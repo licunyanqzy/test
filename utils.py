@@ -1,6 +1,7 @@
 import logging
 import torch
 import shutil
+import os
 
 
 def set_logger(log_path):
@@ -28,3 +29,8 @@ def save_checkpoint(state, is_best, filename="checkpoint.pth.tar"):
         shutil.copyfile(filename, "model_best.pth.tar")
 
 
+def get_dset_path(dset_name, dset_type):
+    _dir = os.path.dirname(__file__)
+    # _dir = _dir.split("/")[:-1]
+    # _dir = "/".join(_dir)
+    return os.path.join(_dir, "datasets", dset_name, dset_type)
