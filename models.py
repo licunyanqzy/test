@@ -149,9 +149,21 @@ class GoalDecoder(nn.Module):
         return pred_goal
 
 
-class Attention(nn.Module):
+class GoalAttention(nn.Module):
+    def __init__(self, goal_dim, action_dim):
+        super(GoalAttention, self).__init__()
+        self.fc = nn.Linear(goal_dim, action_dim, bias=True)
+        self.weight = nn.Softmax()
+
+    def forward(self, action_decoder_hidden_state, goal):
+        return action_decoder_hidden_state.mul(self.weight(self.fc(goal)))
+
+
+class GraphAttention(nn.Module):
     def __init__(self, ):
-        super(Attention, self).__init__()
+        super(GraphAttention, self).__init__()
+
+    def forward(self):
 
 
 
@@ -195,7 +207,10 @@ class TrajectoryPrediction(nn.Module):
             goal_decoder_input_dim=self.goal_decoder_input_dim,
             goal_decoder_hidden_dim=self.goal_decoder_hidden_dim,
         )
-
+        self.goalAttention = GoalAttention(
+            goal_dim=,
+            action_dim=,
+        )
 
 
 
@@ -203,13 +218,14 @@ class TrajectoryPrediction(nn.Module):
 
     def forward(self, input_traj, input_goal, seq_start_end, teacher_forcing_ratio, training_step):
 
-        action_encoder_hidden_state = self.actionEncoder(input_traj)
-
         goal_encoder_hidden_state = self.goalEncoder(input_goal)
 
         pred_goal = self.goalDecoder(input_goal, goal_encoder_hidden_state, teacher_forcing_ratio)  # 输入input_goal有问题,需要分training_step ?
 
-        # 是否需要分training_step ?
+        if training_step == 1:  # training goal encoder-decoder
+            return pred_goal
+        else:   # training action encoder-decoder with goal attention
+            action_encoder_hidden_state = self.actionEncoder(input_traj)
 
 
 
