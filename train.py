@@ -1,12 +1,14 @@
 import argparse
 import numpy as np
 import torch
-import utils
+import torch.optim as optim
+from torch.utils.tensorboard import SummaryWriter
 import os
 import logging
+
 from data.loader import data_loader
-from torch.utils.tensorboard import SummaryWriter
 from models import TrajectoryPrediction
+import utils
 
 
 parser = argparse.ArgumentParser()
@@ -26,7 +28,26 @@ parser.add_argument("--goal_encoder_hidden_dim", default=32, type=int)
 parser.add_argument("--goal_decoder_input_dim", default=16, type=int)
 parser.add_argument("--goal_decoder_hidden_dim", default=32, type=int)
 
+parser.add_argument("--lr", default=1e-3, type=float)
+parser.add_argument("--start_epoch", default=0, type=int)
+parser.add_argument("--num_epoch", default=400, type=int)
+
 parser.add_argument("--gpu_num", default="1", type=str)
+parser.add_argument("--use_gpu", default=True, type=bool)
+
+parser.add_argument("--resume", default="", type=str)
+
+
+bestADE = 100
+
+
+def train(args, model, train_loader, optimizer, epoch, writer, training_step):
+
+    return
+
+
+def validate(args, model, val_loader, epoch, writer):
+
 
 
 def main(args):
@@ -42,7 +63,56 @@ def main(args):
 
     writer = SummaryWriter()
 
+    model = TrajectoryPrediction(   # 实例化模型,...
+        obs_len=args.obs_len,
+        pred_len=args.pred_len,
 
+    )
+    model.cuda()
+    optimizer = optim.Adam(     # 优化参数,...
+        # model.parameters()
+        # 是否需要为每个参数单独设置 ?
+        lr=args.lr
+    )
+
+    if args.resume:     # start from checkpoint
+        if os.path.isfile(args.resume):
+            logging.info("Restoring from checkpoint {}".format(args.resume))
+            checkpoint = torch.load(args.resume)
+            args.start_epoch=checkpoint["epoch"]
+            model.load_state_dict(checkpoint["state_dict"])
+            logging.info(
+                "=> loaded checkpoint '{}' (epoch {})".format(
+                    args.resume, checkpoint["epoch"]
+                )
+            )
+        else:
+            logging.info("=> no checkpoint found as '{}'".format(args.resume))
+
+    global bestADE
+
+    for epoch in range(args.start_epoch, args.num_epoch):   # training...
+        if epoch < 150:
+            train(args, model, train_loader, optimizer, epoch, writer, 1)
+        else:
+            train(args, model, train_loader, optimizer, epoch, writer, 2)
+
+            ADE = validate(args, model, val_loader, epoch, writer)
+            isBest = ADE > bestADE
+            bestADE = min(ADE, bestADE)
+
+            utils.save_checkpoint(  # if ADE > bestADE, save checkpoint
+                {
+                    "epoch": epoch + 1,
+                    "state_dict": model.state_dict(),
+                    "best_ADE": bestADE,
+                    "optimizer": optimizer.state_dict(),
+                },
+                isBest,
+                f"./checkpoint/checkpoint{epoch}.pth.tar",
+            )
+
+    writer.close()
 
 
 if __name__ == '__main__':

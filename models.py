@@ -150,9 +150,9 @@ class GoalDecoder(nn.Module):
 
 
 class GoalAttention(nn.Module):
-    def __init__(self, goal_dim, action_dim):
+    def __init__(self, action_hidden_state_dim):
         super(GoalAttention, self).__init__()
-        self.fc = nn.Linear(goal_dim, action_dim, bias=True)
+        self.fc = nn.Linear(2, action_hidden_state_dim, bias=True)
         self.weight = nn.Softmax()
 
     def forward(self, action_decoder_hidden_state, goal):
@@ -163,13 +163,30 @@ class GraphAttention(nn.Module):
     def __init__(self, ):
         super(GraphAttention, self).__init__()
 
-    def forward(self):
+    def forward(self, action, seq_start_end):
+
+        for start, end in seq_start_end.data:
+            curr_action = action[:, start:end, :]
+
 
 
 
 class ActionDecoder(nn.Module):
-    def __init__(self, ):
+    def __init__(
+            self, action_encoder_hidden_state,
+    ):
         super(ActionDecoder, self).__init__()
+        self.action_encoder_hidden_state = action_encoder_hidden_state
+
+        self.goalAttention = GoalAttention(
+            action_hidden_state_dim=self.action_encoder_hidden_dim,
+        )
+        self.graphAttention = GraphAttention(
+
+        )
+
+    def forward(self, ):
+
 
 
 
@@ -207,13 +224,6 @@ class TrajectoryPrediction(nn.Module):
             goal_decoder_input_dim=self.goal_decoder_input_dim,
             goal_decoder_hidden_dim=self.goal_decoder_hidden_dim,
         )
-        self.goalAttention = GoalAttention(
-            goal_dim=,
-            action_dim=,
-        )
-
-
-
 
 
     def forward(self, input_traj, input_goal, seq_start_end, teacher_forcing_ratio, training_step):
