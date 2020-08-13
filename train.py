@@ -43,11 +43,22 @@ bestADE = 100
 
 def train(args, model, train_loader, optimizer, epoch, writer, training_step):
 
-    return
+    model.train()
+    for batch_idx, batch in enumerate(train_loader):
+        batch = [tensor.cuda() for tensor in batch]
+        (
+            obs_traj,
+            pred_traj,
+            obs_traj_real,
+            pred_traj_gt_rel,
+            loss_mask,
+            seq_start_end,
+        ) = batch
 
 
 def validate(args, model, val_loader, epoch, writer):
 
+    return
 
 
 def main(args):

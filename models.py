@@ -173,20 +173,45 @@ class GraphAttention(nn.Module):
 
 class ActionDecoder(nn.Module):
     def __init__(
-            self, action_encoder_hidden_state,
+            self, pred_len, action_encoder_hidden_state, action_decoder_input_dim
     ):
         super(ActionDecoder, self).__init__()
+        self.pred_len = pred_len
         self.action_encoder_hidden_state = action_encoder_hidden_state
+        self.action_decoder_input_dim = action_decoder_input_dim
 
+        self.inputEmbedding = nn.Linear(2, self.action_decoder_input_dim)
         self.goalAttention = GoalAttention(
             action_hidden_state_dim=self.action_encoder_hidden_dim,
         )
-        self.graphAttention = GraphAttention(
+        self.graphAttention = GraphAttention(   # 实例化 GraphAttention...
 
         )
+        self.actionDecoderLSTM = nn.LSTMCell()
 
-    def forward(self, ):
+    def forward(self, action_real, action_encoder_hidden_state, pred_goal, teacher_forcing_ratio):
+        pred_action = []
+        output = action_real[-self.pred_len-1]
+        batch = action_real.shape[1]
+        action_decoder_hidden_state = action_encoder_hidden_state
+        action_decoder_cell_state = torch.zeros_like(action_decoder_hidden_state).cuda()
 
+        action_real_embedding = self.inputEmbedding(action_real.contiguous().view(-1, 2))
+        action_real_embedding = action_real_embedding.view(-1, batch, self.action_decoder_input_dim)
+
+        if self.training:
+            for i, input_data in enumerate(
+                action_real_embedding[-self.pred_len :].chunk(
+                    action_real_embedding[-self.pred_len :].size(0), dim=0
+                )
+            ):
+                teacher_forcing = random.random() < teacher_forcing_ratio
+                input_data = input_data if teacher_forcing else output
+
+                # three step: goal attention, graph attention, lstm
+
+        else:
+            for i in range(self.pred_len):
 
 
 
