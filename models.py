@@ -173,12 +173,13 @@ class GraphAttention(nn.Module):
 
 class ActionDecoder(nn.Module):
     def __init__(
-            self, pred_len, action_encoder_hidden_state, action_decoder_input_dim
+            self, pred_len, action_encoder_hidden_state, action_decoder_input_dim, action_decoder_hidden_dim
     ):
         super(ActionDecoder, self).__init__()
         self.pred_len = pred_len
         self.action_encoder_hidden_state = action_encoder_hidden_state
         self.action_decoder_input_dim = action_decoder_input_dim
+        self.action_decoder_hidden_dim = action_decoder_hidden_dim
 
         self.inputEmbedding = nn.Linear(2, self.action_decoder_input_dim)
         self.goalAttention = GoalAttention(
@@ -187,9 +188,10 @@ class ActionDecoder(nn.Module):
         self.graphAttention = GraphAttention(   # 实例化 GraphAttention...
 
         )
-        self.actionDecoderLSTM = nn.LSTMCell()
+        self.actionDecoderLSTM = nn.LSTMCell(self.action_decoder_input_dim, self.action_decoder_hidden_dim)
+        self.hidden2pos = nn.Linear(self.action_decoder_hidden_dim, 2)
 
-    def forward(self, action_real, action_encoder_hidden_state, pred_goal, teacher_forcing_ratio):
+    def forward(self, action_real, action_encoder_hidden_state, pred_goal, seq_start_end, teacher_forcing_ratio):
         pred_action = []
         output = action_real[-self.pred_len-1]
         batch = action_real.shape[1]
@@ -207,9 +209,13 @@ class ActionDecoder(nn.Module):
             ):
                 teacher_forcing = random.random() < teacher_forcing_ratio
                 input_data = input_data if teacher_forcing else output
-
-                # three step: goal attention, graph attention, lstm
-
+                action_decoder_hidden_state, action_decoder_cell_state = self.actionDecoderLSTM(    # LSTM
+                    input_data.squeeze(0), (action_decoder_hidden_state, action_decoder_cell_state)
+                )
+                action_decoder_hidden_state = self.goalAttention(action_decoder_hidden_state, pred_goal[i])   # goal attention
+                action_decoder_hidden_state = self.graphAttention(action_decoder_hidden_state, )     # graph attention...
+                output = self.hidden2pos(action_decoder_hidden_state)
+                pred_action += [output]
         else:
             for i in range(self.pred_len):
 
@@ -250,7 +256,6 @@ class TrajectoryPrediction(nn.Module):
             goal_decoder_hidden_dim=self.goal_decoder_hidden_dim,
         )
 
-
     def forward(self, input_traj, input_goal, seq_start_end, teacher_forcing_ratio, training_step):
 
         goal_encoder_hidden_state = self.goalEncoder(input_goal)
@@ -261,15 +266,4 @@ class TrajectoryPrediction(nn.Module):
             return pred_goal
         else:   # training action encoder-decoder with goal attention
             action_encoder_hidden_state = self.actionEncoder(input_traj)
-
-
-
-
-
-
-
-
-
-
-
 

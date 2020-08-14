@@ -61,7 +61,7 @@ def read_file(_path, delim="\t"):
     return np.asarray(data)
 
 
-def poly_fit(traj, traj_len, threshold):
+def poly_fit(traj, traj_len, threshold):    # no usages
     """
     Input:
     - traj: Numpy array of shape (2, traj_len)

@@ -14,7 +14,7 @@ def data_loader(args, path):
         dset,
         batch_size=args.batch_size,
         shuffle=False,
-        num_workers=args.loader_num_workers,
-        collate_fn=seq_collate,
+        num_workers=args.loader_num_workers,    # 多线程读取数据
+        collate_fn=seq_collate,     # 将一个list的sample组成一个mini-batch的函数
         pin_memory=True)
     return dset, loader
