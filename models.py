@@ -155,29 +155,119 @@ class GoalAttention(nn.Module):
         self.fc = nn.Linear(2, action_hidden_state_dim, bias=True)
         self.weight = nn.Softmax()
 
-    def forward(self, action_decoder_hidden_state, goal):
+    def forward(self, action_decoder_hidden_state, goal):   # 维度问题,goal是否包含人数这一维度(即1413),此处计算时是否需要加dim= ?
         return action_decoder_hidden_state.mul(self.weight(self.fc(goal)))
 
 
-class GraphAttention(nn.Module):
-    def __init__(self, ):
+class BatchMultiHeadGraphAttention(nn.Module):
+    def __init__(self, n_head, f_in, f_out, attn_dropout, bias=True):
+        super(BatchMultiHeadGraphAttention, self).__init__()
+        self.n_head = n_head
+        self.f_in = f_in
+        self.f_out = f_out
+        self.w = nn.Parameter(torch.Tensor(n_head, f_in, f_out))
+        self.a_src = nn.Parameter(torch.Tensor(n_head, f_out, 1))
+        self.a_dst = nn.Parameter(torch.Tensor(n_head, f_out, 1))
+
+        self.leaky_relu = nn.LeakyReLU(negative_slope=0.2)
+        self.softmax = nn.Softmax(dim=-1)
+        self.dropout = nn.Dropout(attn_dropout)
+        if bias:
+            self.bias = nn.Parameter(torch.Tensor(f_out))
+            nn.init.constant_(self.bias, 0)
+        else:
+            self.register_parameter("bias", None)
+
+        nn.init.xavier_uniform_(self.w, gain=1.414)
+        nn.init.xavier_uniform_(self.a_src, gain=1.414)
+        nn.init.xavier_uniform_(self.a_dst, gain=1.414)
+
+    def forward(self, h):
+        bs, n = h.size()[:2]
+        h_prime = torch.matmul(h.unsqueeze(1), self.w)
+        attn_src = torch.matmul(h_prime, self.a_src)
+        attn_dst = torch.matmul(h_prime, self.a_dst)
+        attn = attn_src.expand(-1, -1, -1, n) + attn_dst.expand(-1, -1, -1, n).permute(
+            0, 1, 3, 2
+        )
+        attn = self.leaky_relu(attn)
+        attn = self.softmax(attn)
+        attn = self.dropout(attn)
+        output = torch.matmul(attn, h_prime)
+        if self.bias is not None:
+            return output + self.bias, attn
+        else:
+            return output, attn
+
+    def __repr__(self):
+        return (
+            self.__class__.__name__
+            + " ("
+            + str(self.n_head)
+            + " -> "
+            + str(self.f_in)
+            + " -> "
+            + str(self.f_out)
+            + ")"
+        )
+
+
+class GAT(nn.Module):
+    def __init__(self, n_units, n_heads, dropout=0.2, alpha=0.2):
+        super(GAT, self).__init__()
+        self.n_layer = len(n_units) - 1
+        self.dropout = dropout
+        self.layer_stack = nn.ModuleList()
+
+        for i in range(self.n_layer):
+            f_in = n_units[i] * n_heads[i - 1] if i else n_units[i]
+            self.layer_stack.append(
+                BatchMultiHeadGraphAttention(
+                    n_heads[i], f_in=f_in, f_out=n_units[i + 1], attn_dropout=dropout
+                )
+            )
+
+        self.norm_list = [
+            torch.nn.InstanceNorm1d(32).cuda(),
+            torch.nn.InstanceNorm1d(64).cuda(),
+        ]
+
+    def forward(self, x):
+        bs, n = x.size()[:2]
+        for i, gat_layer in enumerate(self.layer_stack):
+            x = self.norm_list[i](x.permute(0, 2, 1)).permute(0, 2, 1)
+            x, attn = gat_layer(x)
+            if i + 1 == self.n_layer:
+                x = x.squeeze(dim=1)
+            else:
+                x = F.elu(x.transpose(1, 2).contiguous().view(bs, n, -1))
+                x = F.dropout(x, self.dropout, training=self.training)
+        else:
+            return x
+
+
+class GraphAttention(nn.Module):    # 存在的问题: attention未考虑相关位置,action的余弦距离等 ?
+    def __init__(self, n_units, n_heads, dropout, alpha):
         super(GraphAttention, self).__init__()
+        self.gat = GAT(n_units, n_heads, dropout, alpha)
 
     def forward(self, action, seq_start_end):
-
+        graphAtt = []
         for start, end in seq_start_end.data:
             curr_action = action[:, start:end, :]
-
-
+            curr_graph_embedding = self.gat(curr_action)
+            graphAtt.append(curr_graph_embedding)
+        graphAtt = torch.cat(graphAtt, dim=1)
+        return graphAtt
 
 
 class ActionDecoder(nn.Module):
     def __init__(
-            self, pred_len, action_encoder_hidden_state, action_decoder_input_dim, action_decoder_hidden_dim
+            self, pred_len, action_decoder_input_dim, action_decoder_hidden_dim,
+            n_units, n_heads, dropout, alpha,
     ):
         super(ActionDecoder, self).__init__()
         self.pred_len = pred_len
-        self.action_encoder_hidden_state = action_encoder_hidden_state
         self.action_decoder_input_dim = action_decoder_input_dim
         self.action_decoder_hidden_dim = action_decoder_hidden_dim
 
@@ -185,8 +275,8 @@ class ActionDecoder(nn.Module):
         self.goalAttention = GoalAttention(
             action_hidden_state_dim=self.action_encoder_hidden_dim,
         )
-        self.graphAttention = GraphAttention(   # 实例化 GraphAttention...
-
+        self.graphAttention = GraphAttention(   # 是否存在问题 ?
+            n_units, n_heads, dropout, alpha
         )
         self.actionDecoderLSTM = nn.LSTMCell(self.action_decoder_input_dim, self.action_decoder_hidden_dim)
         self.hidden2pos = nn.Linear(self.action_decoder_hidden_dim, 2)
@@ -213,12 +303,20 @@ class ActionDecoder(nn.Module):
                     input_data.squeeze(0), (action_decoder_hidden_state, action_decoder_cell_state)
                 )
                 action_decoder_hidden_state = self.goalAttention(action_decoder_hidden_state, pred_goal[i])   # goal attention
-                action_decoder_hidden_state = self.graphAttention(action_decoder_hidden_state, )     # graph attention...
+                action_decoder_hidden_state = self.graphAttention(action_decoder_hidden_state, seq_start_end)     # graph attention
                 output = self.hidden2pos(action_decoder_hidden_state)
                 pred_action += [output]
         else:
             for i in range(self.pred_len):
+                action_decoder_hidden_state, action_decoder_cell_state = self.actionDecoderLSTM(  # LSTM
+                    output, (action_decoder_hidden_state, action_decoder_cell_state)
+                )
+                action_decoder_hidden_state = self.goalAttention(action_decoder_hidden_state, pred_goal[i])  # goal attention
+                action_decoder_hidden_state = self.graphAttention(action_decoder_hidden_state, seq_start_end)  # graph attention
+                output = self.hidden2pos(action_decoder_hidden_state)
+                pred_action += [output]
 
+        return pred_action
 
 
 class TrajectoryPrediction(nn.Module):
@@ -227,7 +325,9 @@ class TrajectoryPrediction(nn.Module):
             action_encoder_input_dim, action_encoder_hidden_dim,
             goal_encoder_input_dim, goal_encoder_hidden_dim,
             goal_decoder_input_dim, goal_decoder_hidden_dim,
-            dropout, noise_dim=(8,), noise_type="gaussian",
+            action_decoder_input_dim, action_decoder_hidden_dim,
+            n_units, n_heads, dropout, alpha,
+            noise_dim=(8,), noise_type="gaussian",
     ):
         super(TrajectoryPrediction, self).__init__()
 
@@ -239,6 +339,8 @@ class TrajectoryPrediction(nn.Module):
         self.goal_encoder_hidden_dim = goal_encoder_hidden_dim
         self.goal_decoder_input_dim = goal_decoder_input_dim
         self.goal_decoder_hidden_dim = goal_decoder_hidden_dim
+        self.action_decoder_input_dim = action_decoder_input_dim
+        self.action_decoder_hidden_dim = action_decoder_hidden_dim
 
         self.actionEncoder = ActionEncoder(
             obs_len=self.obs_len,
@@ -255,8 +357,14 @@ class TrajectoryPrediction(nn.Module):
             goal_decoder_input_dim=self.goal_decoder_input_dim,
             goal_decoder_hidden_dim=self.goal_decoder_hidden_dim,
         )
+        self.actionDecoder = ActionDecoder(
+            pred_len=self.pred_len,
+            action_decoder_input_dim=self.action_decoder_input_dim,
+            action_decoder_hidden_dim=self.action_decoder_hidden_dim,
+            n_units=n_units, n_heads=n_heads, dropout=dropout, alpha=alpha,
+        )
 
-    def forward(self, input_traj, input_goal, seq_start_end, teacher_forcing_ratio, training_step):
+    def forward(self, input_traj, input_goal, seq_start_end, teacher_forcing_ratio, training_step):     # 缺少 add noise...
 
         goal_encoder_hidden_state = self.goalEncoder(input_goal)
 
@@ -266,4 +374,7 @@ class TrajectoryPrediction(nn.Module):
             return pred_goal
         else:   # training action encoder-decoder with goal attention
             action_encoder_hidden_state = self.actionEncoder(input_traj)
-
+            pred_action = self.actionDecoder(
+                input_traj, action_encoder_hidden_state, pred_goal, seq_start_end, teacher_forcing_ratio
+            )
+            return pred_action

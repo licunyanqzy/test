@@ -28,6 +28,13 @@ parser.add_argument("--goal_encoder_input_dim", default=16, type=int)
 parser.add_argument("--goal_encoder_hidden_dim", default=32, type=int)
 parser.add_argument("--goal_decoder_input_dim", default=16, type=int)
 parser.add_argument("--goal_decoder_hidden_dim", default=32, type=int)
+parser.add_argument("--action_decoder_input_dim", default=16, type=int)
+parser.add_argument("--action_decoder_hidden_dim", default=32, type=int)
+
+parser.add_argument()   # n_units...
+parser.add_argument()   # n_heads...
+parser.add_argument("--dropout", default=0, type=float) # dropout rate
+parser.add_argument("alpha", default=0.2, type=float)   # alpha for the leaky relu
 
 parser.add_argument("--lr", default=1e-3, type=float)
 parser.add_argument("--start_epoch", default=0, type=int)
@@ -43,18 +50,35 @@ bestADE = 100
 
 
 def train(args, model, train_loader, optimizer, epoch, writer, training_step):
+    losses = utils.AverageMeter("Loss", ":.6f")     # 作用 ?
+    progress = utils.ProgressMeter(                 # 作用 ?
+        len(train_loader), [losses], prefix="Epoch: [{}]".format(epoch)
+    )
 
     model.train()
     for batch_idx, batch in enumerate(train_loader):
         batch = [tensor.cuda() for tensor in batch]
         (
-            obs_traj,
-            pred_traj,
-            obs_traj_real,
-            pred_traj_gt_rel,
+            obs_traj,           # obs_traj, [8,1413,2]
+            pred_traj_gt,       # pred_traj, [12,1413,2]
+            obs_traj_rel,      # obs_traj_rel, [8,1413,2]
+            pred_traj_gt_rel,   # pred_traj_rel, [12, 1413,2]
+            non_linear_ped,
             loss_mask,
             seq_start_end,
         ) = batch
+
+        optimizer.zero_grad()
+        loss = torch.zeros(1).to(pred_traj_gt)
+        l2_loss_rel = []
+        loss_mask = loss_mask[:, args.obs_len :]
+
+        # 缺少标注数据的模块,...
+
+        if training_step == 1:
+
+        elif training_step == 2:
+
 
 
 def validate(args, model, val_loader, epoch, writer):

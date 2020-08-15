@@ -2,6 +2,7 @@ import logging
 import torch
 import shutil
 import os
+import numpy as np
 
 
 def set_logger(log_path):
@@ -85,3 +86,75 @@ def l2_loss(pred_traj, pred_traj_gt, loss_mask, mode="average"):
         return torch.sum(loss) / torch.numel(loss_mask.data)
     elif mode == "raw":
         return loss.sum(dim=2).sum(dim=1)
+
+
+class AverageMeter(object):     # 作用 ?
+    """Computes and stores the average and current value"""
+
+    def __init__(self, name, fmt=":f"):
+        self.name = name
+        self.fmt = fmt
+        self.reset()
+
+    def reset(self):
+        self.val = 0
+        self.avg = 0
+        self.sum = 0
+        self.count = 0
+
+    def update(self, val, n=1):
+        self.val = val
+        self.sum += val * n
+        self.count += n
+        self.avg = self.sum / self.count
+
+    def __str__(self):
+        fmtstr = "{name} {val" + self.fmt + "} ({avg" + self.fmt + "})"
+        return fmtstr.format(**self.__dict__)
+
+
+class ProgressMeter(object):    # 作用 ?
+    def __init__(self, num_batches, meters, prefix=""):
+        self.batch_fmtstr = self._get_batch_fmtstr(num_batches)
+        self.meters = meters
+        self.prefix = prefix
+
+    def display(self, batch):
+        entries = [self.prefix + self.batch_fmtstr.format(batch)]
+        entries += [str(meter) for meter in self.meters]
+        logging.info("\t".join(entries))
+
+    def _get_batch_fmtstr(self, num_batches):
+        num_digits = len(str(num_batches // 1))
+        fmt = "{:" + str(num_digits) + "d}"
+        return "[" + fmt + "/" + fmt.format(num_batches) + "]"
+
+
+def cal_action(traj):
+    traj = np.array(traj)
+    seq_len, n, c = traj.shape
+    action = np.zeros([seq_len-1, n, c])
+    for i in range(seq_len-1):
+        action[i, :, :] = traj[i+1, :, :] - traj[i, :, :]
+    return action.tolist()
+
+
+def cal_goal(traj, action):                       # [8, 1413, 2]
+    action = np.array(action)
+    traj = np.array(traj)
+    seq_len, num, c = action.shape
+    goal = np.zeros([seq_len, num, c])
+
+    for j in range(num):
+        index = 0
+        for i in range(seq_len - 1):
+            speed = np.linalg.norm(action[i, j, :])
+            turn = np.dot(action[i, j, :], action[i+1, j, :]) / \
+                   (np.linalg.norm(action[i, j, :]) * np.linalg.norm(action[i+1, j, :]))
+            if turn < 0.1 or speed < 0.01:   # 转弯或速度降为0.01,则认为出现goal
+                index = i
+                goal[index:i, j, :] = traj[i, j, :]
+        goal[seq_len-1, j, :] = traj[-1, j, :]
+
+    return goal
+
