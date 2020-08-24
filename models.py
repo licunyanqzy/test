@@ -364,7 +364,7 @@ class TrajectoryPrediction(nn.Module):
             n_units=n_units, n_heads=n_heads, dropout=dropout, alpha=alpha,
         )
 
-    def forward(self, input_traj, input_goal, seq_start_end, teacher_forcing_ratio, training_step):     # 缺少 add noise...
+    def forward(self, input_traj, input_goal, seq_start_end, teacher_forcing_ratio=0.5, training_step=2):     # 缺少 add noise...
 
         goal_encoder_hidden_state = self.goalEncoder(input_goal)
 

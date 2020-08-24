@@ -108,7 +108,7 @@ class AverageMeter(object):     # 作用 ?
         self.count += n
         self.avg = self.sum / self.count
 
-    def __str__(self):
+    def __str__(self):  # 返回一个对象的描述信息
         fmtstr = "{name} {val" + self.fmt + "} ({avg" + self.fmt + "})"
         return fmtstr.format(**self.__dict__)
 
@@ -128,6 +128,26 @@ class ProgressMeter(object):    # 作用 ?
         num_digits = len(str(num_batches // 1))
         fmt = "{:" + str(num_digits) + "d}"
         return "[" + fmt + "/" + fmt.format(num_batches) + "]"
+
+
+def int_tuple(s):
+    return tuple(int(i) for i in s.split(","))
+
+
+def relative_to_abs(rel_traj, start_pos):
+    """
+    Inputs:
+    - rel_traj: pytorch tensor of shape (seq_len, batch, 2)
+    - start_pos: pytorch tensor of shape (batch, 2)
+    Outputs:
+    - abs_traj: pytorch tensor of shape (seq_len, batch, 2)
+    """
+    # batch, seq_len, 2
+    rel_traj = rel_traj.permute(1, 0, 2)
+    displacement = torch.cumsum(rel_traj, dim=1)
+    start_pos = torch.unsqueeze(start_pos, dim=1)
+    abs_traj = displacement + start_pos
+    return abs_traj.permute(1, 0, 2)
 
 
 def cal_action(traj):
@@ -156,5 +176,5 @@ def cal_goal(traj, action):                       # [8, 1413, 2]
                 goal[index:i, j, :] = traj[i, j, :]
         goal[seq_len-1, j, :] = traj[-1, j, :]
 
-    return goal
+    return goal.tolist()
 
