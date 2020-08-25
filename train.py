@@ -1,5 +1,6 @@
 import argparse
 import numpy as np
+import random
 import torch
 import torch.optim as optim
 from torch.utils.tensorboard import SummaryWriter
@@ -19,6 +20,7 @@ parser.add_argument("--delim", default="\t")
 parser.add_argument("--loader_num_workers", default=4, type=int)    # The number of background threads to use for data loading
 parser.add_argument("--skip", default=1, type=int)
 parser.add_argument("--batch_size", default=64, type=int)
+parser.add_argument("--seed", default=72, type=int)
 
 parser.add_argument("--obs_len", default=8, type=int)
 parser.add_argument("--pred_len", default=12, type=int)
@@ -65,17 +67,17 @@ def train(args, model, train_loader, optimizer, epoch, writer, training_step):
         (
             obs_traj,           # obs_traj, [8,1413,2]
             pred_traj_gt,       # pred_traj, [12,1413,2]
-            obs_traj_rel,      # obs_traj_rel, [8,1413,2]
+            obs_traj_rel,       # obs_traj_rel, [8,1413,2]
             pred_traj_gt_rel,   # pred_traj_rel, [12, 1413,2]
             non_linear_ped,
-            loss_mask,
-            seq_start_end,
+            loss_mask,          # [1413, 20]
+            seq_start_end,      # [64, 2]
         ) = batch
 
         optimizer.zero_grad()
         loss = torch.zeros(1).to(pred_traj_gt)
         l2_loss_rel = []
-        loss_mask = loss_mask[:, args.obs_len :]
+        loss_mask = loss_mask[:, args.obs_len:]
 
         # 标注 action, goal
         obs_action = utils.cal_action(obs_traj_rel)
@@ -86,17 +88,20 @@ def train(args, model, train_loader, optimizer, epoch, writer, training_step):
         input_traj = torch.cat((obs_action, pred_action_gt), dim=0)
         input_goal = torch.cat((obs_goal, pred_goal_gt), dim=0)
 
-        if training_step == 1:
+        if training_step == 1:      # training goal seq2seq
             pred_goal_fake = model(
-                input_traj, input_goal, seq_start_end, 1, training_step,
+                input_traj, input_goal, seq_start_end, 1, training_step,    # teacher_forcing_ratio 的取值 ?
             )
             l2_loss_rel.append(
                 utils.l2_loss(pred_goal_fake, pred_goal_gt, loss_mask, mode="raw")
             )
-        elif training_step == 2:
+        elif training_step == 2:        # training action(traj) seq2seq
             pred_action_fake = model(
-                input_traj, input_goal, seq_start_end, 1, training_step,
+                input_traj, input_goal, seq_start_end, 1, training_step,    # teacher_forcing_ratio 的取值 ?
             )
+
+            # 是否需要 action -> traj 然后计算Loss ?
+
             l2_loss_rel.append(
                 utils.l2_loss(pred_action_fake, pred_action_gt, loss_mask, mode="raw")
             )
@@ -167,6 +172,11 @@ def validate(args, model, val_loader, epoch, writer):
 
 
 def main(args):
+    random.seed(args.seed)
+    np.random.seed(args.seed)
+    torch.manual_seed(args.seed)
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
 
     os.environ["CUDA_VISIBLE_DEVICES"] = args.gpu_num
     train_path = utils.get_dset_path(args.dataset_name, "train")
@@ -190,17 +200,16 @@ def main(args):
         goal_decoder_hidden_dim=args.goal_decoder_hidden_dim,
         action_decoder_input_dim=args.action_decoder_input_dim,
         action_decoder_hidden_dim=args.acton_decoder_hidden_dim,
-        n_units=args.n_units,
-        n_heads=args.n_heads,
+        n_units=args.n_units,   # 存在问题 ?
+        n_heads=args.n_heads,   # 存在问题 ?
         dropout=args.dropout,
         alpha=args.alpha,
         noise_dim=args.noise_dim,
         noise_type=args.noise_type,
     )
     model.cuda()
-    optimizer = optim.Adam(     # 优化参数,...
-        # model.parameters()
-        # 是否需要为每个参数单独设置 ?
+    optimizer = optim.Adam(     # 是否需要为每个模块单独设置参数 ?
+        model.parameters(),
         lr=args.lr
     )
 
@@ -208,7 +217,7 @@ def main(args):
         if os.path.isfile(args.resume):
             logging.info("Restoring from checkpoint {}".format(args.resume))
             checkpoint = torch.load(args.resume)
-            args.start_epoch=checkpoint["epoch"]
+            args.start_epoch = checkpoint["epoch"]
             model.load_state_dict(checkpoint["state_dict"])
             logging.info(
                 "=> loaded checkpoint '{}' (epoch {})".format(
@@ -220,14 +229,14 @@ def main(args):
 
     global bestADE
 
-    for epoch in range(args.start_epoch, args.num_epoch):   # training...
+    for epoch in range(args.start_epoch, args.num_epoch):
         if epoch < 150:
-            train(args, model, train_loader, optimizer, epoch, writer, 1)
+            train(args, model, train_loader, optimizer, epoch, writer, 1)   # train goal seq2seq
         else:
-            train(args, model, train_loader, optimizer, epoch, writer, 2)
+            train(args, model, train_loader, optimizer, epoch, writer, 2)   # train action(traj) seq2seq
 
             ADE = validate(args, model, val_loader, epoch, writer)
-            isBest = ADE > bestADE
+            is_best = ADE > bestADE
             bestADE = min(ADE, bestADE)
 
             utils.save_checkpoint(  # if ADE > bestADE, save checkpoint
@@ -237,7 +246,7 @@ def main(args):
                     "best_ADE": bestADE,
                     "optimizer": optimizer.state_dict(),
                 },
-                isBest,
+                is_best,
                 f"./checkpoint/checkpoint{epoch}.pth.tar",
             )
 

@@ -115,7 +115,7 @@ def main(args):
 
 if __name__ == "__main__":
     args = parser.parse_args()
-    torch.manual_seed(64)   # 作用 ?
-    torch.backends.cudnn.deterministic = True   # 作用 ?
-    torch.backends.cudnn.benchmark = False   # 作用 ?
+    torch.manual_seed(72)
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
     main(args)
