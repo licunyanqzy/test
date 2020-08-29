@@ -134,7 +134,7 @@ def int_tuple(s):
     return tuple(int(i) for i in s.split(","))
 
 
-def relative_to_abs(rel_traj, start_pos):
+def relative_to_abs(rel_traj, start_pos):   # 作用 ?
     """
     Inputs:
     - rel_traj: pytorch tensor of shape (seq_len, batch, 2)
@@ -159,6 +159,7 @@ def cal_action(traj):
     return action.tolist()
 
 
+# 需要先试一下,goal的数量大于1的轨迹在总体轨迹中占比多少 ?
 def cal_goal(traj, action):                       # [8, 1413, 2]
     action = np.array(action)
     traj = np.array(traj)
@@ -171,10 +172,12 @@ def cal_goal(traj, action):                       # [8, 1413, 2]
             speed = np.linalg.norm(action[i, j, :])
             turn = np.dot(action[i, j, :], action[i+1, j, :]) / \
                    (np.linalg.norm(action[i, j, :]) * np.linalg.norm(action[i+1, j, :]))
-            if turn < 0.1 or speed < 0.01:   # 转弯或速度降为0.01,则认为出现goal
+            if turn < 0.1 or speed < 0.01:   # 转弯的余弦值小于0.1或速度降为0.01,则认为出现goal, 参数需要是否调整 ?
                 index = i
                 goal[index:i, j, :] = traj[i, j, :]
         goal[seq_len-1, j, :] = traj[-1, j, :]
+
+    # 需要补充：若整段轨迹没有停止或转弯,则标记最后一个点为goal ？
 
     return goal.tolist()
 

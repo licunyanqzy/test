@@ -78,6 +78,8 @@ def get_model(checkpoint):
 
 
 def evaluate(args, loader, model):
+    ADE_outer, FDE_outer = [], []
+    traj_sum = 0
 
     with torch.no_grad():
         for batch in loader:
@@ -93,11 +95,36 @@ def evaluate(args, loader, model):
             ) = batch
 
             ADE, FDE = [], []
+            traj_sum += pred_traj_gt(1)
 
             for _ in range(args.num_samples):
+                obs_action = utils.cal_action(obs_traj_rel)
+                obs_goal = utils.cal_goal(obs_traj_rel, obs_action)
+                pred_action_gt = utils.cal_action(pred_traj_gt_rel)
+                pred_goal_gt = utils.cal_goal(pred_traj_gt_rel, pred_action_gt)
 
+                pred_action_fake = model(  # 默认 teacher_forcing_ratio = 0.5, training_step = 2, 前者是否需要调整 ?
+                    obs_action, obs_goal, seq_start_end,
+                )
 
-    return ADE, FDE
+                # 是否需要 action -> trajectory, 然后计算Loss ?
+
+                pred_action_fake_predpart = pred_action_fake[-args.pred_len:]
+                pred_action_fake_abs = utils.relative_to_abs(pred_action_fake_predpart, obs_traj[-1])
+
+                ADE_, FDE_ = utils.cal_ADE_FDE(pred_action_gt, pred_action_fake_abs, mode="raw")
+                ADE.append(ADE_)
+                FDE.append(FDE_)
+
+            ADE_sum = evaluate_helper(ADE, seq_start_end)
+            FDE_sum = evaluate_helper(FDE, seq_start_end)
+            ADE_outer.append(ADE_sum)
+            FDE_outer.append(FDE_sum)
+
+        ADE_output = sum(ADE_outer) / (traj_sum * args.pred_len)    # 此处重新命名一个变量ADE_output是否有问题,是否直接使用ADE ?
+        FDE_output = sum(FDE_outer) / (traj_sum * args.pred_len)    # 问题同上 ?
+
+        return ADE_output, FDE_output
 
 
 def main(args):

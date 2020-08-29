@@ -134,10 +134,10 @@ def validate(args, model, val_loader, epoch, writer):
     with torch.no_grad:
         for i, batch in enumerate(val_loader):
             (
-                obs_traj,          # obs_traj, [8,1413,2]
-                pred_traj_gt,      # pred_traj, [12,1413,2]
-                obs_traj_rel,      # obs_traj_rel, [8,1413,2]
-                pred_traj_gt_rel,  # pred_traj_rel, [12, 1413,2]
+                obs_traj,          # obs_traj, [8,235,2]
+                pred_traj_gt,      # pred_traj, [12,235,2]
+                obs_traj_rel,      # obs_traj_rel, [8,235,2]
+                pred_traj_gt_rel,  # pred_traj_rel, [12, 235,2]
                 non_linear_ped,
                 loss_mask,
                 seq_start_end,
@@ -149,12 +149,17 @@ def validate(args, model, val_loader, epoch, writer):
             pred_action_gt = utils.cal_action(pred_traj_gt_rel)
             pred_goal_gt = utils.cal_goal(pred_traj_gt_rel, pred_action_gt)
 
-            pred_action_fake = model(
+            pred_action_fake = model(   # 默认 teacher_forcing_ratio = 0.5, training_step = 2, 前者是否需要调整 ?
                 obs_action, obs_goal, seq_start_end,
             )
 
-            # 是否还需要做处理 ?
-            ADE_, FDE_ = utils.cal_ADE_FDE(pred_action_gt, pred_action_fake)
+            # 是否需要 action -> traj 然后计算Loss ?
+
+            # 是否还需要这两步的处理 ?
+            pred_action_fake_predpart = pred_action_fake[-args.pred_len:]
+            pred_action_fake_abs = utils.relative_to_abs(pred_action_fake_predpart, obs_traj[-1])
+
+            ADE_, FDE_ = utils.cal_ADE_FDE(pred_action_gt, pred_action_fake_abs)
             ADE_ = ADE_ / (obs_traj.shape[1] * args.pred_len)
             FDE_ = FDE_ / (obs_traj.shape[1])
             ADE.update(ADE_, obs_traj.shape[1])
