@@ -27,6 +27,19 @@ def make_mlp(dim_list, activation="relu", batch_norm=True, dropout=0):
     return nn.Sequential(*layers)
 
 
+class AutomaticWeightLoss(nn.Module):
+    def __init__(self, num=2):
+        super(AutomaticWeightLoss, self).__init__()
+        params = torch.ones(num, requires_grad=True)    # 初始值如何设置 ?
+        self.params = nn.Parameter(params)
+
+    def forward(self, loss):
+        weight_loss = 0
+        for i in range(len(loss)):
+            weight_loss += 0.5 / (self.params[i] ** 2) * loss[i] + torch.log(self.params[i])
+        return weight_loss
+
+
 class ActionEncoder(nn.Module):
     def __init__(
             self, obs_len, action_encoder_input_dim, action_encoder_hidden_dim,
