@@ -177,7 +177,8 @@ def cal_goal(traj, action):                       # [8, 1413, 2]
                 goal[index:i, j, :] = traj[i, j, :]
         goal[seq_len-1, j, :] = traj[-1, j, :]
 
-    # 需要补充：若整段轨迹没有停止或转弯,则标记最后一个点为goal ？
+    # 需要补充：若整段轨迹没有停止或转弯,则标记最后一个点为goal ?
+    # 需要补充：从静止到运动也需要标记 ?
 
     return goal.tolist()
 
