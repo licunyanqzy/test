@@ -114,64 +114,6 @@ class GoalEncoder(nn.Module):
         return goal_encoder_hidden_state
 
 
-class GoalDecoder(nn.Module):
-    def __init__(
-            self, pred_len, goal_decoder_input_dim, goal_decoder_hidden_dim,
-    ):
-        super(GoalDecoder, self).__init__()
-        self.pred_len = pred_len
-        self.goal_decoder_input_dim = goal_decoder_input_dim
-        self.goal_decoder_hidden_dim = goal_decoder_hidden_dim
-
-        self.goalDecoderLSTM = nn.LSTMCell(self.goal_decoder_input_dim, self.goal_decoder_hidden_dim)
-        self.hidden2pos = nn.Linear(self.goal_decoder_hidden_dim, 2)
-        self.inputEmbedding = nn.Linear(2, self.goal_decoder_input_dim)
-
-    def forward(self, goal_real, input_hidden_state, teacher_forcing_ratio):    # 尚缺少加噪声的部分 ?
-        pred_goal = []
-        output = goal_real[-self.pred_len-1]
-        batch = goal_real.shape[1]
-        goal_decoder_hidden_state = input_hidden_state
-        goal_decoder_cell_state = torch.zeros_like(goal_decoder_hidden_state).cuda()
-
-        goal_real_embedding = self.inputEmbedding(goal_real.contiguous().view(-1, 2))
-        goal_real_embedding = goal_real_embedding.view(-1, batch, self.goal_decoder_input_dim)
-
-        if self.training:
-            for i, input_data in enumerate(
-                    goal_real_embedding[-self.pred_len:].chunk(
-                        goal_real_embedding[-self.pred_len:].size(0), dim=0
-                    )
-            ):
-                teacher_forcing = random.random() < teacher_forcing_ratio
-                input_data = input_data if teacher_forcing else output
-                goal_decoder_hidden_state, goal_decoder_cell_state = self.goalDecoderLSTM(
-                    input_data.squeeze(0), (goal_decoder_hidden_state, goal_decoder_cell_state)
-                )
-                output = self.hidden2pos(goal_decoder_hidden_state)
-                pred_goal += [output]
-        else:
-            for i in range(self.pred_len):
-                goal_decoder_hidden_state, goal_decoder_cell_state = self.goalDecoderLSTM(
-                    output, (goal_decoder_hidden_state, goal_decoder_cell_state)
-                )
-                output = self.hidden2pos(goal_decoder_hidden_state)
-                pred_goal += [output]
-
-        # outputs = torch.stack(pred_goal)    # 是否需要这步操作 ?
-        return pred_goal
-
-
-class GoalAttention(nn.Module):
-    def __init__(self, action_hidden_state_dim):
-        super(GoalAttention, self).__init__()
-        self.fc = nn.Linear(2, action_hidden_state_dim, bias=True)
-        self.weight = nn.Softmax()
-
-    def forward(self, action_decoder_hidden_state, goal):   # 维度问题,goal是否包含人数这一维度(即1413),此处计算时是否需要加dim= ?
-        return action_decoder_hidden_state.mul(self.weight(self.fc(goal)))
-
-
 class BatchMultiHeadGraphAttention(nn.Module):
     def __init__(self, n_head, f_in, f_out, attn_dropout, bias=True):
         super(BatchMultiHeadGraphAttention, self).__init__()
@@ -260,6 +202,9 @@ class GAT(nn.Module):
 
 
 class GraphAttention(nn.Module):    # 存在的问题: attention未考虑相关位置,action的余弦距离等 ?
+    """
+    交互模块, 刻画其他人的影响
+    """
     def __init__(self, n_units, n_heads, dropout, alpha):
         super(GraphAttention, self).__init__()
         self.gat = GAT(n_units, n_heads, dropout, alpha)
@@ -274,62 +219,90 @@ class GraphAttention(nn.Module):    # 存在的问题: attention未考虑相关�
         return graphAtt
 
 
-class ActionDecoder(nn.Module):
+class GoalAttention(nn.Module):
+    """
+    goal 指导生成 action
+    """
+    def __init__(self, action_hidden_state_dim):
+        super(GoalAttention, self).__init__()
+        self.fc = nn.Linear(2, action_hidden_state_dim, bias=True)
+        self.weight = nn.Softmax()
+
+    def forward(self, action_decoder_hidden_state, goal):   # 维度问题,goal是否包含人数这一维度(即1413),此处计算时是否需要加dim= ?
+        return action_decoder_hidden_state.mul(self.weight(self.fc(goal)))
+
+
+class ActionAttention(nn.Module):
+    """
+    action 反作用于 goal, 约束下一时刻的goal
+    """
+    def __init__(self, goal_hidden_state_dim):
+        super(ActionAttention, self).__init__()
+        self.fc = nn.Linear(2, goal_hidden_state_dim, bias=True)
+        self.weight = nn.Softmax()
+
+    def forward(self, goal_decoder_hidden_state, action):   # 是否存在类似维度问题 ?
+        return goal_decoder_hidden_state.mul(self.weight(self.fc(action)))
+
+
+class Decoder(nn.Module):
     def __init__(
-            self, pred_len, action_decoder_input_dim, action_decoder_hidden_dim,
-            n_units, n_heads, dropout, alpha,
+            self, pred_len, n_units, n_heads, dropout, alpha,
+            action_decoder_input_dim, action_decoder_hidden_dim, goal_decoder_input_dim, goal_decoder_hidden_dim
     ):
-        super(ActionDecoder, self).__init__()
+        super(Decoder, self).__init__()
         self.pred_len = pred_len
+        self.goal_decoder_input_dim = goal_decoder_input_dim
+        self.goal_decoder_hidden_dim = goal_decoder_hidden_dim
         self.action_decoder_input_dim = action_decoder_input_dim
         self.action_decoder_hidden_dim = action_decoder_hidden_dim
 
-        self.inputEmbedding = nn.Linear(2, self.action_decoder_input_dim)
+        self.goalDecoderLSTM = nn.LSTMCell(self.goal_decoder_input_dim, self.goal_decoder_hidden_dim)
+        self.hidden2goal = nn.Linear(self.goal_decoder_hidden_dim, 2)
+        self.goalEmbedding = nn.Linear(2, self.goal_decoder_input_dim)
+
+        self.actionDecoderLSTM = nn.LSTMCell(self.action_decoder_input_dim, self.action_decoder_hidden_dim)
+        self.actionEmbedding = nn.Linear(2, self.action_decoder_input_dim)
+        self.hidden2action = nn.Linear(self.action_decoder_hidden_dim, 2)
+
         self.goalAttention = GoalAttention(
             action_hidden_state_dim=self.action_encoder_hidden_dim,
         )
-        self.graphAttention = GraphAttention(   # 是否存在问题 ?
+        self.actionAttention = ActionAttention(
+            goal_hidden_state_dim=self.goal_decoder_hidden_dim,
+        )
+        self.graphAttention = GraphAttention(  # 是否存在问题 ?
             n_units, n_heads, dropout, alpha
         )
-        self.actionDecoderLSTM = nn.LSTMCell(self.action_decoder_input_dim, self.action_decoder_hidden_dim)
-        self.hidden2pos = nn.Linear(self.action_decoder_hidden_dim, 2)
 
-    def forward(self, action_real, action_encoder_hidden_state, pred_goal, seq_start_end, teacher_forcing_ratio):
+    def forward(
+            self, teacher_forcing_ratio, seq_start_end,
+            goal_real, goal_input_hidden_state,
+            action_real, action_input_hidden_state,
+    ):
+        pred_goal = []
+        goal_output = goal_real[-self.pred_len-1]
+        goal_decoder_hidden_state = goal_input_hidden_state
+        goal_decoder_cell_state = torch.zeros_like(goal_decoder_hidden_state).cuda()
+
         pred_action = []
-        output = action_real[-self.pred_len-1]
-        batch = action_real.shape[1]
-        action_decoder_hidden_state = action_encoder_hidden_state
+        action_output = action_real[-self.pred_len-1]
+        action_decoder_hidden_state = action_input_hidden_state
         action_decoder_cell_state = torch.zeros_like(action_decoder_hidden_state).cuda()
 
-        action_real_embedding = self.inputEmbedding(action_real.contiguous().view(-1, 2))
+        batch = action_real.shape[1]
+        action_real_embedding = self.actionEmbedding(action_real.contiguous().view(-1, 2))
         action_real_embedding = action_real_embedding.view(-1, batch, self.action_decoder_input_dim)
+        goal_real_embedding = self.inputEmbedding(goal_real.contiguous().view(-1, 2))
+        goal_real_embedding = goal_real_embedding.view(-1, batch, self.goal_decoder_input_dim)
 
         if self.training:
-            for i, input_data in enumerate(
-                action_real_embedding[-self.pred_len :].chunk(
-                    action_real_embedding[-self.pred_len :].size(0), dim=0
-                )
-            ):
-                teacher_forcing = random.random() < teacher_forcing_ratio
-                input_data = input_data if teacher_forcing else output
-                action_decoder_hidden_state, action_decoder_cell_state = self.actionDecoderLSTM(    # LSTM
-                    input_data.squeeze(0), (action_decoder_hidden_state, action_decoder_cell_state)
-                )
-                action_decoder_hidden_state = self.goalAttention(action_decoder_hidden_state, pred_goal[i])   # goal attention
-                action_decoder_hidden_state = self.graphAttention(action_decoder_hidden_state, seq_start_end)     # graph attention
-                output = self.hidden2pos(action_decoder_hidden_state)
-                pred_action += [output]
-        else:
-            for i in range(self.pred_len):
-                action_decoder_hidden_state, action_decoder_cell_state = self.actionDecoderLSTM(  # LSTM
-                    output, (action_decoder_hidden_state, action_decoder_cell_state)
-                )
-                action_decoder_hidden_state = self.goalAttention(action_decoder_hidden_state, pred_goal[i])  # goal attention
-                action_decoder_hidden_state = self.graphAttention(action_decoder_hidden_state, seq_start_end)  # graph attention
-                output = self.hidden2pos(action_decoder_hidden_state)
-                pred_action += [output]
 
-        return pred_action
+        else:
+
+
+        # outputs = torch.stack(pred_goal)    # 是否需要这步操作 ?, 然后返回 outputs ?
+        return pred_goal, pred_action
 
 
 class TrajectoryPrediction(nn.Module):
@@ -391,3 +364,124 @@ class TrajectoryPrediction(nn.Module):
                 input_traj, action_encoder_hidden_state, pred_goal, seq_start_end, teacher_forcing_ratio
             )
             return pred_action
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+class GoalDecoder(nn.Module):
+    def __init__(
+            self, pred_len, goal_decoder_input_dim, goal_decoder_hidden_dim,
+    ):
+        super(GoalDecoder, self).__init__()
+        self.pred_len = pred_len
+        self.goal_decoder_input_dim = goal_decoder_input_dim
+        self.goal_decoder_hidden_dim = goal_decoder_hidden_dim
+
+        self.goalDecoderLSTM = nn.LSTMCell(self.goal_decoder_input_dim, self.goal_decoder_hidden_dim)
+        self.hidden2pos = nn.Linear(self.goal_decoder_hidden_dim, 2)
+        self.inputEmbedding = nn.Linear(2, self.goal_decoder_input_dim)
+
+    def forward(self, goal_real, input_hidden_state, teacher_forcing_ratio):    # 尚缺少加噪声的部分 ?
+        pred_goal = []
+        output = goal_real[-self.pred_len-1]
+        batch = goal_real.shape[1]
+        goal_decoder_hidden_state = input_hidden_state
+        goal_decoder_cell_state = torch.zeros_like(goal_decoder_hidden_state).cuda()
+
+        goal_real_embedding = self.inputEmbedding(goal_real.contiguous().view(-1, 2))
+        goal_real_embedding = goal_real_embedding.view(-1, batch, self.goal_decoder_input_dim)
+
+        if self.training:
+            for i, input_data in enumerate(
+                    goal_real_embedding[-self.pred_len:].chunk(
+                        goal_real_embedding[-self.pred_len:].size(0), dim=0
+                    )
+            ):
+                teacher_forcing = random.random() < teacher_forcing_ratio
+                input_data = input_data if teacher_forcing else output
+                goal_decoder_hidden_state, goal_decoder_cell_state = self.goalDecoderLSTM(
+                    input_data.squeeze(0), (goal_decoder_hidden_state, goal_decoder_cell_state)
+                )
+                output = self.hidden2pos(goal_decoder_hidden_state)
+                pred_goal += [output]
+        else:
+            for i in range(self.pred_len):
+                goal_decoder_hidden_state, goal_decoder_cell_state = self.goalDecoderLSTM(
+                    output, (goal_decoder_hidden_state, goal_decoder_cell_state)
+                )
+                output = self.hidden2pos(goal_decoder_hidden_state)
+                pred_goal += [output]
+
+        # outputs = torch.stack(pred_goal)    # 是否需要这步操作 ?
+        return pred_goal
+
+
+class ActionDecoder(nn.Module):
+    def __init__(
+            self, pred_len, action_decoder_input_dim, action_decoder_hidden_dim,
+            n_units, n_heads, dropout, alpha,
+    ):
+        super(ActionDecoder, self).__init__()
+        self.pred_len = pred_len
+        self.action_decoder_input_dim = action_decoder_input_dim
+        self.action_decoder_hidden_dim = action_decoder_hidden_dim
+
+        self.inputEmbedding = nn.Linear(2, self.action_decoder_input_dim)
+        self.goalAttention = GoalAttention(
+            action_hidden_state_dim=self.action_encoder_hidden_dim,
+        )
+        self.graphAttention = GraphAttention(   # 是否存在问题 ?
+            n_units, n_heads, dropout, alpha
+        )
+        self.actionDecoderLSTM = nn.LSTMCell(self.action_decoder_input_dim, self.action_decoder_hidden_dim)
+        self.hidden2pos = nn.Linear(self.action_decoder_hidden_dim, 2)
+
+    def forward(self, action_real, action_encoder_hidden_state, pred_goal, seq_start_end, teacher_forcing_ratio):
+        pred_action = []
+        output = action_real[-self.pred_len-1]
+        batch = action_real.shape[1]
+        action_decoder_hidden_state = action_encoder_hidden_state
+        action_decoder_cell_state = torch.zeros_like(action_decoder_hidden_state).cuda()
+
+        action_real_embedding = self.inputEmbedding(action_real.contiguous().view(-1, 2))
+        action_real_embedding = action_real_embedding.view(-1, batch, self.action_decoder_input_dim)
+
+        if self.training:
+            for i, input_data in enumerate(
+                action_real_embedding[-self.pred_len :].chunk(
+                    action_real_embedding[-self.pred_len :].size(0), dim=0
+                )
+            ):
+                teacher_forcing = random.random() < teacher_forcing_ratio
+                input_data = input_data if teacher_forcing else output
+                action_decoder_hidden_state, action_decoder_cell_state = self.actionDecoderLSTM(    # LSTM
+                    input_data.squeeze(0), (action_decoder_hidden_state, action_decoder_cell_state)
+                )
+                action_decoder_hidden_state = self.goalAttention(action_decoder_hidden_state, pred_goal[i])   # goal attention
+                action_decoder_hidden_state = self.graphAttention(action_decoder_hidden_state, seq_start_end)     # graph attention
+                output = self.hidden2pos(action_decoder_hidden_state)
+                pred_action += [output]
+        else:
+            for i in range(self.pred_len):
+                action_decoder_hidden_state, action_decoder_cell_state = self.actionDecoderLSTM(  # LSTM
+                    output, (action_decoder_hidden_state, action_decoder_cell_state)
+                )
+                action_decoder_hidden_state = self.goalAttention(action_decoder_hidden_state, pred_goal[i])  # goal attention
+                action_decoder_hidden_state = self.graphAttention(action_decoder_hidden_state, seq_start_end)  # graph attention
+                output = self.hidden2pos(action_decoder_hidden_state)
+                pred_action += [output]
+
+        return pred_action
+
