@@ -150,13 +150,18 @@ def relative_to_abs(rel_traj, start_pos):   # 作用 ?
     return abs_traj.permute(1, 0, 2)
 
 
-def cal_action(traj):
+# 是否需要维持8个点的长度不变 ?
+def traj2action(traj):
     traj = np.array(traj)
     seq_len, n, c = traj.shape
     action = np.zeros([seq_len-1, n, c])
     for i in range(seq_len-1):
         action[i, :, :] = traj[i+1, :, :] - traj[i, :, :]
     return action.tolist()
+
+
+def action2traj(action):
+
 
 
 # 需要先试一下,goal的数量大于1的轨迹在总体轨迹中占比多少 ?
@@ -177,8 +182,8 @@ def cal_goal(traj, action):                       # [8, 1413, 2]
                 goal[index:i, j, :] = traj[i, j, :]
         goal[seq_len-1, j, :] = traj[-1, j, :]
 
-    # 需要补充：若整段轨迹没有停止或转弯,则标记最后一个点为goal ?
-    # 需要补充：从静止到运动也需要标记 ?
+    # 需要补充：若整段轨迹没有停止或转弯,则标记最后一个点为goal ...
+    # 需要补充：从静止到运动也需要标记 ...
 
     return goal.tolist()
 

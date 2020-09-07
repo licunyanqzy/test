@@ -293,16 +293,60 @@ class Decoder(nn.Module):
         batch = action_real.shape[1]
         action_real_embedding = self.actionEmbedding(action_real.contiguous().view(-1, 2))
         action_real_embedding = action_real_embedding.view(-1, batch, self.action_decoder_input_dim)
+        action_real_embedding_chunk = action_real_embedding[-self.pred_len:].chunk(
+            action_real_embedding[-self.pred_len:].size(0), dim=0
+        )
         goal_real_embedding = self.inputEmbedding(goal_real.contiguous().view(-1, 2))
         goal_real_embedding = goal_real_embedding.view(-1, batch, self.goal_decoder_input_dim)
+        goal_real_embedding_chunk = goal_real_embedding[-self.pred_len:].chunk(
+            goal_real_embedding[-self.pred_len:].size(0), dim=0
+        )
 
         if self.training:
+            for i in range(self.pred_len):
+                action_input_data = action_real_embedding_chunk[i]
+                goal_input_data = goal_real_embedding_chunk[i]
 
+                teacher_forcing = random.random() < teacher_forcing_ratio
+                if teacher_forcing:
+                    action_input_data = action_input_data
+                    goal_input_data = goal_input_data
+                else:
+                    action_input_data = action_output
+                    goal_input_data = goal_output
+
+                goal_decoder_hidden_state, goal_decoder_cell_state = self.goalDecoderLSTM(
+                    goal_input_data.squeeze(0), (goal_decoder_hidden_state, goal_decoder_cell_state)
+                )
+                goal_output = self.hidden2goal(goal_decoder_hidden_state)
+                pred_goal += [goal_output]
+                action_decoder_hidden_state, action_decoder_cell_state = self.actionDecoderLSTM(
+                    action_input_data.squeeze(0), (action_decoder_hidden_state, action_decoder_cell_state)
+                )
+                action_decoder_hidden_state = self.goalAttention(action_decoder_hidden_state, goal_output)
+                action_decoder_hidden_state = self.graphAttention(action_decoder_hidden_state, seq_start_end)
+                action_output = self.hidden2action(action_decoder_hidden_state)
+                pred_action += [action_output]
+                goal_decoder_hidden_state = self.actionAttention(goal_decoder_hidden_state, action_output)
         else:
+            for i in range(self.pred_len):
+                goal_decoder_hidden_state, goal_decoder_cell_state = self.goalDecoderLSTM(
+                    goal_output.squeeze(0), (goal_decoder_hidden_state, goal_decoder_cell_state)
+                )
+                goal_output = self.hidden2goal(goal_decoder_hidden_state)
+                pred_goal += [goal_output]
+                action_decoder_hidden_state, action_decoder_cell_state = self.actionDecoderLSTM(
+                    action_output.squeeze(0), (action_decoder_hidden_state, action_decoder_cell_state)
+                )
+                action_decoder_hidden_state = self.goalAttention(action_decoder_hidden_state, goal_output)
+                action_decoder_hidden_state = self.graphAttention(action_decoder_hidden_state, seq_start_end)
+                action_output = self.hidden2action(action_decoder_hidden_state)
+                pred_action += [action_output]
+                goal_decoder_hidden_state = self.actionAttention(goal_decoder_hidden_state, action_output)
 
-
-        # outputs = torch.stack(pred_goal)    # 是否需要这步操作 ?, 然后返回 outputs ?
-        return pred_goal, pred_action
+        pred_goal_output = torch.stack(pred_goal)
+        pred_action_output = torch.stack(pred_action)
+        return pred_goal_output, pred_action_output
 
 
 class TrajectoryPrediction(nn.Module):
@@ -338,32 +382,31 @@ class TrajectoryPrediction(nn.Module):
             goal_encoder_input_dim=self.goal_encoder_input_dim,
             goal_encoder_hidden_dim=self.goal_encoder_hidden_dim,
         )
-        self.goalDecoder = GoalDecoder(
+        self.Decoder = Decoder(
             pred_len=self.pred_len,
             goal_decoder_input_dim=self.goal_decoder_input_dim,
             goal_decoder_hidden_dim=self.goal_decoder_hidden_dim,
-        )
-        self.actionDecoder = ActionDecoder(
-            pred_len=self.pred_len,
             action_decoder_input_dim=self.action_decoder_input_dim,
             action_decoder_hidden_dim=self.action_decoder_hidden_dim,
             n_units=n_units, n_heads=n_heads, dropout=dropout, alpha=alpha,
         )
 
-    def forward(self, input_traj, input_goal, seq_start_end, teacher_forcing_ratio=0.5, training_step=2):     # 缺少 add noise...
+    def forward(
+            self, input_action, input_goal, seq_start_end, teacher_forcing_ratio=0.5,
+    ):     # 缺少 add noise...
 
         goal_encoder_hidden_state = self.goalEncoder(input_goal)
+        action_encoder_hidden_state = self.actionEncoder(input_action)
+        pred_goal, pred_action = self.Decoder(
+            input_goal, goal_encoder_hidden_state,
+            input_action, action_encoder_hidden_state,
+            teacher_forcing_ratio, seq_start_end,
+        )
+        return pred_goal, pred_action
 
-        pred_goal = self.goalDecoder(input_goal, goal_encoder_hidden_state, teacher_forcing_ratio)  # 输入input_goal有问题,需要分training_step ?
 
-        if training_step == 1:  # training goal encoder-decoder
-            return pred_goal
-        else:   # training action encoder-decoder with goal attention
-            action_encoder_hidden_state = self.actionEncoder(input_traj)
-            pred_action = self.actionDecoder(
-                input_traj, action_encoder_hidden_state, pred_goal, seq_start_end, teacher_forcing_ratio
-            )
-            return pred_action
+
+
 
 
 

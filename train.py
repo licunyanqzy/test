@@ -9,6 +9,7 @@ import logging
 
 from data.loader import data_loader
 from models import TrajectoryPrediction
+from models import AutomaticWeightLoss
 import utils
 from utils import int_tuple
 
@@ -55,7 +56,7 @@ parser.add_argument("--resume", default="", type=str)
 bestADE = 100
 
 
-def train(args, model, train_loader, optimizer, epoch, writer, training_step):
+def train(args, model, weightLoss, train_loader, optimizer, epoch, writer):
     losses = utils.AverageMeter("Loss", ":.6f")     # 作用 ?
     progress = utils.ProgressMeter(                 # 作用 ?
         len(train_loader), [losses], prefix="Epoch: [{}]".format(epoch)
@@ -80,31 +81,23 @@ def train(args, model, train_loader, optimizer, epoch, writer, training_step):
         loss_mask = loss_mask[:, args.obs_len:]
 
         # 标注 action, goal
-        obs_action = utils.cal_action(obs_traj_rel)
+        obs_action = utils.traj2action(obs_traj_rel)
         obs_goal = utils.cal_goal(obs_traj_rel, obs_action)
-        pred_action_gt = utils.cal_action(pred_traj_gt_rel)
+        pred_action_gt = utils.traj2action(pred_traj_gt_rel)
         pred_goal_gt = utils.cal_goal(pred_traj_gt_rel, pred_action_gt)
 
-        input_traj = torch.cat((obs_action, pred_action_gt), dim=0)
+        input_action = torch.cat((obs_action, pred_action_gt), dim=0)
         input_goal = torch.cat((obs_goal, pred_goal_gt), dim=0)
 
-        if training_step == 1:      # training goal seq2seq
-            pred_goal_fake = model(
-                input_traj, input_goal, seq_start_end, 1, training_step,    # teacher_forcing_ratio 的取值 ?
-            )
-            l2_loss_rel.append(
-                utils.l2_loss(pred_goal_fake, pred_goal_gt, loss_mask, mode="raw")
-            )
-        elif training_step == 2:        # training action(traj) seq2seq
-            pred_action_fake = model(
-                input_traj, input_goal, seq_start_end, 1, training_step,    # teacher_forcing_ratio 的取值 ?
-            )
+        pred_goal_fake, pred_action_fake = model(
+            input_action, input_goal, seq_start_end, 1      # teacher_forcing_ratio 的取值 ?
+        )
 
-            # 是否需要 action -> traj 然后计算Loss ?
-
-            l2_loss_rel.append(
-                utils.l2_loss(pred_action_fake, pred_action_gt, loss_mask, mode="raw")
-            )
+        pred_traj_fake = utils.action2traj(pred_action_fake)
+        l2_action = utils.l2_loss(pred_action_fake, pred_action_gt, loss_mask, mode="raw")
+        l2_goal = utils.l2_loss(pred_goal_fake, pred_goal_gt, loss_mask, mode="raw")
+        l2_weight = weightLoss([l2_action, l2_goal])
+        l2_loss_rel.append(l2_weight)
 
         l2_loss_sum_rel = torch.zeros(1).to(pred_traj_gt)
         l2_loss_rel = torch.stack(l2_loss_rel, dim=1)
@@ -125,12 +118,13 @@ def train(args, model, train_loader, optimizer, epoch, writer, training_step):
     writer.add_scalar("train_loss", losses.avg, epoch)
 
 
-def validate(args, model, val_loader, epoch, writer):
+def validate(args, model, weightLoss, val_loader, epoch, writer):
     ADE = utils.AverageMeter("ADE", ":.6f")
     FDE = utils.AverageMeter("FDE", ":.6f")
     progress = utils.ProgressMeter(len(val_loader), [ADE, FDE], prefix="Test: ")
 
     model.eval()
+    weightLoss.eval()
     with torch.no_grad:
         for i, batch in enumerate(val_loader):
             (
@@ -213,8 +207,13 @@ def main(args):
         noise_type=args.noise_type,
     )
     model.cuda()
+    weightLoss = AutomaticWeightLoss(num=2)
+    weightLoss.cuda()
     optimizer = optim.Adam(     # 是否需要为每个模块单独设置参数 ?
-        model.parameters(),
+        [
+            {"params": model.parameters()},
+            {"params": weightLoss.parameters()}
+        ],
         lr=args.lr
     )
 
@@ -235,25 +234,22 @@ def main(args):
     global bestADE
 
     for epoch in range(args.start_epoch, args.num_epoch):
-        if epoch < 150:
-            train(args, model, train_loader, optimizer, epoch, writer, 1)   # train goal seq2seq
-        else:
-            train(args, model, train_loader, optimizer, epoch, writer, 2)   # train action(traj) seq2seq
+        train(args, model, weightLoss, train_loader, optimizer, epoch, writer)
 
-            ADE = validate(args, model, val_loader, epoch, writer)
-            is_best = ADE > bestADE
-            bestADE = min(ADE, bestADE)
+        ADE = validate(args, model, val_loader, epoch, writer)
+        is_best = ADE > bestADE
+        bestADE = min(ADE, bestADE)
 
-            utils.save_checkpoint(  # if ADE > bestADE, save checkpoint
-                {
-                    "epoch": epoch + 1,
-                    "state_dict": model.state_dict(),
-                    "best_ADE": bestADE,
-                    "optimizer": optimizer.state_dict(),
-                },
-                is_best,
-                f"./checkpoint/checkpoint{epoch}.pth.tar",
-            )
+        utils.save_checkpoint(  # if ADE > bestADE, save checkpoint
+            {
+                "epoch": epoch + 1,
+                "state_dict": model.state_dict(),
+                "best_ADE": bestADE,
+                "optimizer": optimizer.state_dict(),
+            },
+            is_best,
+            f"./checkpoint/checkpoint{epoch}.pth.tar",
+        )
 
     writer.close()
 
