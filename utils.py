@@ -160,8 +160,9 @@ def traj2action(traj):
     return action.tolist()
 
 
+# to be continued...
 def action2traj(action):
-
+    pass
 
 
 # 需要先试一下,goal的数量大于1的轨迹在总体轨迹中占比多少 ?

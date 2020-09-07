@@ -138,22 +138,22 @@ def validate(args, model, weightLoss, val_loader, epoch, writer):
             ) = batch
 
             loss_mask = loss_mask[:, args.obs_len:]
-            obs_action = utils.cal_action(obs_traj_rel)
+            obs_action = utils.traj2action(obs_traj_rel)
             obs_goal = utils.cal_goal(obs_traj_rel, obs_action)
-            pred_action_gt = utils.cal_action(pred_traj_gt_rel)
+            pred_action_gt = utils.traj2action(pred_traj_gt_rel)
             pred_goal_gt = utils.cal_goal(pred_traj_gt_rel, pred_action_gt)
 
-            pred_action_fake = model(   # 默认 teacher_forcing_ratio = 0.5, training_step = 2, 前者是否需要调整 ?
+            pred_goal_fake, pred_action_fake = model(   # 默认 teacher_forcing_ratio = 0.5, training_step = 2, 前者是否需要调整 ?
                 obs_action, obs_goal, seq_start_end,
             )
 
-            # 是否需要 action -> traj 然后计算Loss ?
+            pred_traj_fake = utils.action2traj(pred_action_fake)
 
             # 是否还需要这两步的处理 ?
-            pred_action_fake_predpart = pred_action_fake[-args.pred_len:]
-            pred_action_fake_abs = utils.relative_to_abs(pred_action_fake_predpart, obs_traj[-1])
+            pred_traj_fake_predpart = pred_traj_fake[-args.pred_len:]
+            pred_traj_fake_abs = utils.relative_to_abs(pred_traj_fake_predpart, obs_traj[-1])
 
-            ADE_, FDE_ = utils.cal_ADE_FDE(pred_action_gt, pred_action_fake_abs)
+            ADE_, FDE_ = utils.cal_ADE_FDE(pred_traj_gt, pred_traj_fake_abs)
             ADE_ = ADE_ / (obs_traj.shape[1] * args.pred_len)
             FDE_ = FDE_ / (obs_traj.shape[1])
             ADE.update(ADE_, obs_traj.shape[1])
