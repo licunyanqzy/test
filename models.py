@@ -4,7 +4,7 @@ import torch.nn.functional as F
 import random
 
 
-def add_noise(shape, noise_type):
+def get_noise(shape, noise_type):
     if noise_type == "gaussian":
         return torch.randn(*shape).cuda()
     elif noise_type == "uniform":
@@ -247,15 +247,18 @@ class ActionAttention(nn.Module):
 
 class Decoder(nn.Module):
     def __init__(
-            self, pred_len, n_units, n_heads, dropout, alpha,
+            self, obs_len, pred_len, n_units, n_heads, dropout, alpha,
             action_decoder_input_dim, action_decoder_hidden_dim, goal_decoder_input_dim, goal_decoder_hidden_dim
     ):
         super(Decoder, self).__init__()
+        self.obs_len = obs_len
         self.pred_len = pred_len
         self.goal_decoder_input_dim = goal_decoder_input_dim
         self.goal_decoder_hidden_dim = goal_decoder_hidden_dim
         self.action_decoder_input_dim = action_decoder_input_dim
         self.action_decoder_hidden_dim = action_decoder_hidden_dim
+
+        # add noise 之后, 维度需要随之变化, to be continued...
 
         self.goalDecoderLSTM = nn.LSTMCell(self.goal_decoder_input_dim, self.goal_decoder_hidden_dim)
         self.hidden2goal = nn.Linear(self.goal_decoder_hidden_dim, 2)
@@ -280,15 +283,18 @@ class Decoder(nn.Module):
             goal_real, goal_input_hidden_state,
             action_real, action_input_hidden_state,
     ):
-        pred_goal = []
-        goal_output = goal_real[-self.pred_len-1]
+
         goal_decoder_hidden_state = goal_input_hidden_state
         goal_decoder_cell_state = torch.zeros_like(goal_decoder_hidden_state).cuda()
-
-        pred_action = []
-        action_output = action_real[-self.pred_len-1]
         action_decoder_hidden_state = action_input_hidden_state
         action_decoder_cell_state = torch.zeros_like(action_decoder_hidden_state).cuda()
+
+        pred_goal = []
+        goal_output = goal_real[self.obs_len - 1]
+        pred_action = []
+        action_output = action_real[self.obs_len - 1]
+        # 需要维护 pred_traj, pred_action 两个列表, to be continued...
+        pred_traj = []
 
         batch = action_real.shape[1]
         action_real_embedding = self.actionEmbedding(action_real.contiguous().view(-1, 2))
@@ -354,8 +360,8 @@ class TrajectoryPrediction(nn.Module):
             self, obs_len, pred_len,
             action_encoder_input_dim, action_encoder_hidden_dim,
             goal_encoder_input_dim, goal_encoder_hidden_dim,
-            goal_decoder_input_dim, goal_decoder_hidden_dim,
-            action_decoder_input_dim, action_decoder_hidden_dim,
+            goal_decoder_input_dim, action_decoder_input_dim,
+            # action_decoder_hidden_dim, goal_decoder_hidden_dim,
             n_units, n_heads, dropout, alpha,
             noise_dim=(8,), noise_type="gaussian",
     ):
@@ -368,9 +374,14 @@ class TrajectoryPrediction(nn.Module):
         self.goal_encoder_input_dim = goal_encoder_input_dim
         self.goal_encoder_hidden_dim = goal_encoder_hidden_dim
         self.goal_decoder_input_dim = goal_decoder_input_dim
-        self.goal_decoder_hidden_dim = goal_decoder_hidden_dim
         self.action_decoder_input_dim = action_decoder_input_dim
-        self.action_decoder_hidden_dim = action_decoder_hidden_dim
+        # self.goal_decoder_hidden_dim = goal_decoder_hidden_dim
+        # self.action_decoder_hidden_dim = action_decoder_hidden_dim
+        self.noise_dim = noise_dim
+        self.noise_type = noise_type
+
+        self.goal_decoder_hidden_dim = self.goal_encoder_hidden_dim + self.noise_dim[0]
+        self.action_decoder_hidden_dim = self.action_encoder_hidden_dim + self.noise_dim[0]
 
         self.actionEncoder = ActionEncoder(
             obs_len=self.obs_len,
@@ -383,6 +394,7 @@ class TrajectoryPrediction(nn.Module):
             goal_encoder_hidden_dim=self.goal_encoder_hidden_dim,
         )
         self.Decoder = Decoder(
+            obs_len=self.obs_len,
             pred_len=self.pred_len,
             goal_decoder_input_dim=self.goal_decoder_input_dim,
             goal_decoder_hidden_dim=self.goal_decoder_hidden_dim,
@@ -391,17 +403,35 @@ class TrajectoryPrediction(nn.Module):
             n_units=n_units, n_heads=n_heads, dropout=dropout, alpha=alpha,
         )
 
+    def add_noise(self, _input, seq_start_end):
+        noise_shape = (seq_start_end.size(0),) + self.noise_dim
+        z_decoder = get_noise(noise_shape, self.noise_type)
+        _list = []
+        for idx, (start, end) in enumerate(seq_start_end):
+            start = start.item()
+            end = end.item()
+            _vec = z_decoder[idx].view(1, -1)
+            _to_cat = _vec.repeat(end-start, 1)
+            _list.append(torch.cat([_input[start:end], _to_cat], dim=1))
+        decoder_h = torch.cat(_list, dim=0)
+        return decoder_h
+
     def forward(
             self, input_action, input_goal, seq_start_end, teacher_forcing_ratio=0.5,
-    ):     # 缺少 add noise...
-
+    ):
         goal_encoder_hidden_state = self.goalEncoder(input_goal)
         action_encoder_hidden_state = self.actionEncoder(input_action)
+
+        # add noise 噪声加的是否正确 ?
+        goal_hidden_state_noise = self.add_noise(goal_encoder_hidden_state, seq_start_end)
+        action_hidden_state_noise = self.add_noise(action_encoder_hidden_state, seq_start_end)
+
         pred_goal, pred_action = self.Decoder(
-            input_goal, goal_encoder_hidden_state,
-            input_action, action_encoder_hidden_state,
+            input_goal, goal_hidden_state_noise,
+            input_action, action_hidden_state_noise,
             teacher_forcing_ratio, seq_start_end,
         )
+
         return pred_goal, pred_action
 
 

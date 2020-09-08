@@ -31,9 +31,9 @@ parser.add_argument("--action_encoder_hidden_dim", default=32, type=int)
 parser.add_argument("--goal_encoder_input_dim", default=16, type=int)
 parser.add_argument("--goal_encoder_hidden_dim", default=32, type=int)
 parser.add_argument("--goal_decoder_input_dim", default=16, type=int)
-parser.add_argument("--goal_decoder_hidden_dim", default=32, type=int)
 parser.add_argument("--action_decoder_input_dim", default=16, type=int)
-parser.add_argument("--action_decoder_hidden_dim", default=32, type=int)
+# parser.add_argument("--goal_decoder_hidden_dim", default=32, type=int)
+# parser.add_argument("--action_decoder_hidden_dim", default=32, type=int)
 
 parser.add_argument()   # n_units...
 parser.add_argument()   # n_heads...
@@ -196,9 +196,9 @@ def main(args):
         goal_encoder_input_dim=args.goal_encoder_hidden_dim,
         goal_encoder_hidden_dim=args.goal_encoder_hidden_dim,
         goal_decoder_input_dim=args.goal_decoder_hidden_input_dim,
-        goal_decoder_hidden_dim=args.goal_decoder_hidden_dim,
         action_decoder_input_dim=args.action_decoder_input_dim,
-        action_decoder_hidden_dim=args.acton_decoder_hidden_dim,
+        # goal_decoder_hidden_dim=args.goal_decoder_hidden_dim,
+        # action_decoder_hidden_dim=args.acton_decoder_hidden_dim,
         n_units=args.n_units,   # 存在问题 ?
         n_heads=args.n_heads,   # 存在问题 ?
         dropout=args.dropout,
