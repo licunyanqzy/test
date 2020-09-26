@@ -150,27 +150,14 @@ def relative_to_abs(rel_traj, start_pos):   # 作用 ?
     return abs_traj.permute(1, 0, 2)
 
 
-# 是否需要维持8个点的长度不变 ?
-def traj2action(traj):
-    traj = np.array(traj)
-    seq_len, n, c = traj.shape
-    action = np.zeros([seq_len-1, n, c])
-    for i in range(seq_len-1):
-        action[i, :, :] = traj[i+1, :, :] - traj[i, :, :]
-    return action.tolist()
+def cal_goal(traj):                       # Tensor [8, 1413, 2]
+    seq_len, num, c = traj.size()
 
+    action = torch.zeros(seq_len-1, num, c)
+    for i in range(seq_len - 1):
+        action[i, :, :] = traj[i + 1, :, :] - traj[i, :, :]
 
-# to be continued...
-def action2traj(action):
-    pass
-
-
-# 需要先试一下,goal的数量大于1的轨迹在总体轨迹中占比多少 ?
-def cal_goal(traj, action):                       # [8, 1413, 2]
-    action = np.array(action)
-    traj = np.array(traj)
-    seq_len, num, c = action.shape
-    goal = np.zeros([seq_len, num, c])
+    goal = torch.zeros(seq_len, num, c)
 
     for j in range(num):
         index = 0
@@ -178,13 +165,10 @@ def cal_goal(traj, action):                       # [8, 1413, 2]
             speed = np.linalg.norm(action[i, j, :])
             turn = np.dot(action[i, j, :], action[i+1, j, :]) / \
                    (np.linalg.norm(action[i, j, :]) * np.linalg.norm(action[i+1, j, :]))
-            if turn < 0.1 or speed < 0.01:   # 转弯的余弦值小于0.1或速度降为0.01,则认为出现goal, 参数需要是否调整 ?
+            if turn < 0.3 or speed < 0.1:   # 转弯的余弦值小于0.1或速度降为0.01,则认为出现goal, 参数需要是否调整 ?
                 index = i
                 goal[index:i, j, :] = traj[i, j, :]
-        goal[seq_len-1, j, :] = traj[-1, j, :]
+        goal[index:seq_len, j, :] = traj[-1, j, :]
 
-    # 需要补充：若整段轨迹没有停止或转弯,则标记最后一个点为goal ...
-    # 需要补充：从静止到运动也需要标记 ...
-
-    return goal.tolist()
+    return goal
 

@@ -26,19 +26,17 @@ parser.add_argument("--seed", default=72, type=int)
 parser.add_argument("--obs_len", default=8, type=int)
 parser.add_argument("--pred_len", default=12, type=int)
 
-parser.add_argument("--action_encoder_input_dim", default=8, type=int)
 parser.add_argument("--action_encoder_hidden_dim", default=32, type=int)
-parser.add_argument("--goal_encoder_input_dim", default=16, type=int)
+parser.add_argument("--action_input_dim", default=16, type=int)
+parser.add_argument("--goal_input_dim", default=16, type=int)
 parser.add_argument("--goal_encoder_hidden_dim", default=32, type=int)
-parser.add_argument("--goal_decoder_input_dim", default=16, type=int)
-parser.add_argument("--action_decoder_input_dim", default=16, type=int)
-# parser.add_argument("--goal_decoder_hidden_dim", default=32, type=int)
-# parser.add_argument("--action_decoder_hidden_dim", default=32, type=int)
+parser.add_argument("distance_embedding_dim", default=32, type=int)
 
-parser.add_argument()   # n_units...
-parser.add_argument()   # n_heads...
-parser.add_argument("--dropout", default=0, type=float) # dropout rate
+parser.add_argument("--hidden_units", default="16", type=str)   # n_units
+parser.add_argument("--heads", default="4,1", type=str)   # n_heads
+parser.add_argument("--dropout", default=0, type=float)     # dropout rate
 parser.add_argument("--alpha", default=0.2, type=float)   # alpha for the leaky relu
+
 parser.add_argument("--noise_dim", default=(16,), type=int_tuple)
 parser.add_argument("--noise_type", default="gaussian", type=str)
 
@@ -80,23 +78,20 @@ def train(args, model, weightLoss, train_loader, optimizer, epoch, writer):
         l2_loss_rel = []
         loss_mask = loss_mask[:, args.obs_len:]
 
-        # 标注 action, goal
-        obs_action = utils.traj2action(obs_traj_rel)
-        obs_goal = utils.cal_goal(obs_traj_rel, obs_action)
-        pred_action_gt = utils.traj2action(pred_traj_gt_rel)
-        pred_goal_gt = utils.cal_goal(pred_traj_gt_rel, pred_action_gt)
-
-        input_action = torch.cat((obs_action, pred_action_gt), dim=0)
-        input_goal = torch.cat((obs_goal, pred_goal_gt), dim=0)
+        input_traj = torch.cat((obs_traj_rel, pred_traj_gt_rel), dim=0)
+        input_goal = utils.cal_goal(input_traj)
 
         pred_goal_fake, pred_action_fake = model(
-            input_action, input_goal, seq_start_end, 1      # teacher_forcing_ratio 的取值 ?
+            input_traj, input_goal, seq_start_end, 1      # teacher_forcing_ratio 的取值 ?
         )
 
-        pred_traj_fake = utils.action2traj(pred_action_fake)
-        l2_action = utils.l2_loss(pred_action_fake, pred_action_gt, loss_mask, mode="raw")
+        # 输入/输出 traj
+        pred_traj_fake = pred_action_fake
+        pred_goal_gt = input_goal[args.obs_len:]
+
+        l2_traj = utils.l2_loss(pred_traj_fake, pred_traj_gt_rel, loss_mask, mode="raw")
         l2_goal = utils.l2_loss(pred_goal_fake, pred_goal_gt, loss_mask, mode="raw")
-        l2_weight = weightLoss([l2_action, l2_goal])
+        l2_weight = weightLoss([l2_traj, l2_goal])
         l2_loss_rel.append(l2_weight)
 
         l2_loss_sum_rel = torch.zeros(1).to(pred_traj_gt)
@@ -104,7 +99,7 @@ def train(args, model, weightLoss, train_loader, optimizer, epoch, writer):
         for start, end in seq_start_end.data:
             _l2_loss_rel = torch.narrow(l2_loss_rel, 0, start, end-start)
             _l2_loss_rel = torch.sum(_l2_loss_rel, dim=0)
-            _l2_loss_rel = torch.min(_l2_loss_rel) / ((pred_action_fake.shape[0]) * (end-start))
+            _l2_loss_rel = torch.min(_l2_loss_rel) / ((pred_traj_fake.shape[0]) * (end-start))
             l2_loss_sum_rel += _l2_loss_rel
 
         loss += l2_loss_sum_rel
@@ -138,16 +133,16 @@ def validate(args, model, weightLoss, val_loader, epoch, writer):
             ) = batch
 
             loss_mask = loss_mask[:, args.obs_len:]
-            obs_action = utils.traj2action(obs_traj_rel)
-            obs_goal = utils.cal_goal(obs_traj_rel, obs_action)
-            pred_action_gt = utils.traj2action(pred_traj_gt_rel)
-            pred_goal_gt = utils.cal_goal(pred_traj_gt_rel, pred_action_gt)
+            obs_goal = utils.cal_goal(obs_traj_rel)
+            pred_goal_gt = utils.cal_goal(pred_traj_gt_rel)
 
             pred_goal_fake, pred_action_fake = model(   # 默认 teacher_forcing_ratio = 0.5, training_step = 2, 前者是否需要调整 ?
-                obs_action, obs_goal, seq_start_end,
+                obs_traj_rel, seq_start_end,  # 暂时输入/输出 traj ?
             )
 
-            pred_traj_fake = utils.action2traj(pred_action_fake)
+            # 输入/输出 traj
+            pred_traj_fake = pred_action_fake
+            # pred_traj_fake = utils.action2traj(pred_action_fake)
 
             # 是否还需要这两步的处理 ?
             pred_traj_fake_predpart = pred_traj_fake[-args.pred_len:]
@@ -188,19 +183,23 @@ def main(args):
 
     writer = SummaryWriter()
 
+    n_units = [
+        [args.action_encoder_hidden_dim]
+        + [int(x) for x in args.hidden_units.strip().split(",")]
+        + [args.action_encoder_hidden_dim]
+    ]
+    n_heads = [int(x) for x in args.heads.strip().split(",")]
+
     model = TrajectoryPrediction(   # 实例化模型,...
         obs_len=args.obs_len,
         pred_len=args.pred_len,
-        action_encoder_input_dim=args.action_encoder_input_dim,
+        action_input_dim=args.action_input_dim,
         action_encoder_hidden_dim=args.action_encoder_hidden_dim,
-        goal_encoder_input_dim=args.goal_encoder_hidden_dim,
+        goal_input_dim=args.goal_input_dim,
         goal_encoder_hidden_dim=args.goal_encoder_hidden_dim,
-        goal_decoder_input_dim=args.goal_decoder_hidden_input_dim,
-        action_decoder_input_dim=args.action_decoder_input_dim,
-        # goal_decoder_hidden_dim=args.goal_decoder_hidden_dim,
-        # action_decoder_hidden_dim=args.acton_decoder_hidden_dim,
-        n_units=args.n_units,   # 存在问题 ?
-        n_heads=args.n_heads,   # 存在问题 ?
+        distance_embedding_dim=args.distance_embedding_dim,
+        n_units=n_units,
+        n_heads=n_heads,
         dropout=args.dropout,
         alpha=args.alpha,
         noise_dim=args.noise_dim,
