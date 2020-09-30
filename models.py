@@ -3,6 +3,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 import random
 import numpy as np
+import os
 
 
 def get_noise(shape, noise_type):
@@ -143,22 +144,43 @@ class GraphAttentionLayer(nn.Module):
         nn.init.xavier_uniform_(self.a_src, gain=1.414)
         nn.init.xavier_uniform_(self.a_dst, gain=1.414)
 
-    def forward(self, h, idx):      # 维度可能存在问题 ?
-        bs, n = h.size()[:2]
-        h_prime = torch.matmul(h.unsqueeze(1), self.w)
+    def forward(self, h, idx):
+        # 维度可能存在问题 ?
+        # idx是否有用 ?
+
+        n = h.size()[0]
+
+        # print(h.size())
+        # print(self.w.size())
+        # print(self.a_src.size())
+        # print(self.a_dst.size())
+
+        h_prime = torch.matmul(h, self.w)
         attn_src = torch.matmul(h_prime, self.a_src)
         attn_dst = torch.matmul(h_prime, self.a_dst)
-        attn = attn_src.expand(-1, -1, -1, n) + attn_dst.expand(-1, -1, -1, n).permute(
-            0, 1, 3, 2
-        )
+        attn = attn_src.expand(-1, -1, n) + attn_dst.expand(-1, -1, n).permute(0, 2, 1)     # 作用 ?
+
+        # print("\n")
+        # print(attn_src.size())
+        # print(attn_dst.size())
+        # print(attn.size())
+        # print("\n")
+
         attn = self.leaky_relu(attn)
         attn = self.softmax(attn)
         attn = self.dropout(attn)
         output = torch.matmul(attn, h_prime)
+        output_mean = torch.mean(output, dim=0)
+
+        # print(attn.size())
+        # print(output.size())
+        # print(output_mean.size())
+        # os._exit(0)
+
         if self.bias is not None:
-            return output + self.bias, attn
+            return output_mean + self.bias
         else:
-            return output, attn
+            return output_mean
 
     def __repr__(self):
         return (
@@ -176,7 +198,7 @@ class GraphAttentionLayer(nn.Module):
 class InteractionGate(nn.Module):
     def __init__(self, distance_embedding_dim, action_decoder_hidden_dim):
         super(InteractionGate, self).__init__()
-        self.embedding = nn.Linear(2, distance_embedding_dim)
+        self.embedding = nn.Linear(1, distance_embedding_dim)
         self.fc = nn.Linear(
             distance_embedding_dim * 2 + action_decoder_hidden_dim * 2, action_decoder_hidden_dim
         )
@@ -187,17 +209,17 @@ class InteractionGate(nn.Module):
         n1 = (a1[0]*a2[1] - a1[1]*a2[0]) * (g1[0]-g2[0]) - (a1[0]-a2[0]) * (g1[0]*g2[1] - g1[0]*g2[0])
         n2 = (a1[0]*a2[1] - a1[1]*a2[0]) * (g1[1]-g2[1]) - (a1[1]-a2[0]) * (g1[0]*g2[1] - g1[0]*g2[0])
 
-        d1 = np.linalg.norm(a1 - g1, ord=2)
-        d2 = np.linalg.norm(a2 - g2, ord=2)
+        d1 = torch.norm(a1 - g1)
+        d2 = torch.norm(a2 - g2)
 
         if not dn == 0:
             p1 = n1 / dn
             p2 = n2 / dn
             if (a1[0] - p1) * (p1 - g1[0]) > 0:
-                d1 = np.linalg.norm(a1 - [p1, p2], ord=2)
-                d2 = np.linalg.norm(a2 - [p1, p2], ord=2)
+                d1 = torch.norm(a1 - [p1, p2])
+                d2 = torch.norm(a2 - [p1, p2])
 
-        return d1, d2
+        return d1.unsqueeze(0), d2.unsqueeze(0)
 
     def forward(self, action_hidden_state, goal_hidden_state, goal, position, idx):
         n = goal.size()[0]
@@ -206,15 +228,16 @@ class InteractionGate(nn.Module):
             d1, d2 = self.cal_distance(position[idx], goal[i], position[idx], position[i])
             if i == idx:
                 continue
-            d1_embedding = self.embedding(d1)   # 是否需要转成Tensor ?
-            d2_embedding = self.embedding(d2)   # 是否需要转成Tensor ?
+
+            d1_embedding = self.embedding(d1)
+            d2_embedding = self.embedding(d2)
             fc_input = torch.cat(
                 [action_hidden_state[idx], action_hidden_state[i], d1_embedding, d2_embedding], dim=0
             )
             action_hidden_state[i] = self.gate(self.fc(fc_input))
 
-        d = np.linalg.norm(position[idx] - goal[idx], ord=2)
-        d_embedding = self.embedding(d)     # 是否需要转成Tensor ?
+        d = torch.norm(position[idx] - goal[idx]).unsqueeze(0)
+        d_embedding = self.embedding(d)
         fc_input = torch.cat(
             [action_hidden_state[idx], goal_hidden_state, d_embedding, d_embedding], dim=0
         )
@@ -237,21 +260,23 @@ class GAT(nn.Module):
         )
         self.interactionGate = InteractionGate(distance_embedding_dim, action_decoder_hidden_dim)
 
+    def cal_dist(self, goal, action):
+        distance = torch.zeros()
+
     def forward(self, action_hidden_state, goal_hidden_state, goal, action):
-        bs, n = action_hidden_state.size()[:2]
+        # 只能进行一层GAT, 如何实现两层 ? to be continued ...
+
+        n = action_hidden_state.size()[0]
         outputs = []
         for idx in range(n):
             curr_action, curr_goal = self.interactionGate(
                 action_hidden_state, goal_hidden_state[idx], goal, action, idx
             )
-
-            gat_input = torch.cat([curr_action, curr_goal], dim=0)
-
-            # 只能进行一层GAT, 如何实现两层 ? to be continued ...
-
+            gat_input = torch.cat([curr_action, curr_goal.unsqueeze(0)])
             gat_output = self.gatLayer(gat_input, idx)
-            gat_output = F.elu(gat_output.transpose(1, 2).contiguous().view(bs, n, -1))
+            gat_output = F.elu(gat_output)
             outputs += [gat_output[idx]]
+
         outputs = torch.stack(outputs)
         return outputs
 
@@ -274,17 +299,18 @@ class Attention(nn.Module):
     def forward(
             self, action_decoder_hidden_state, goal_decoder_hidden_state, goal, action, seq_start_end
     ):
-        output_hidden_state = []
+        outputs = []
         for start, end in seq_start_end.data:
-            curr_action_hidden_state = action_decoder_hidden_state[:, start:end, :]
-            curr_goal_hidden_state = goal_decoder_hidden_state[:, start:end, :]
-            curr_goal = goal[:, start:end, :]
-            curr_action = action[:, start:end, :]
+            curr_action_hidden_state = action_decoder_hidden_state[start:end, :]     # [1413, 48]
+            curr_goal_hidden_state = goal_decoder_hidden_state[start:end, :]     # [1413, 48]
+            curr_goal = goal[start:end, :]       # [1413, 2]
+            curr_action = action[start:end, :]       # [1413, 2]
             curr_graph_embedding = self.gat(
                 curr_action_hidden_state, curr_goal_hidden_state, curr_goal, curr_action
             )
-            output_hidden_state.append(curr_graph_embedding)
-        output_hidden_state = torch.cat(output_hidden_state, dim=1)
+            outputs.append(curr_graph_embedding)
+
+        output_hidden_state = torch.cat(outputs, dim=0)
         return output_hidden_state
 
 
@@ -430,8 +456,8 @@ class TrajectoryPrediction(nn.Module):
         self.obs_len = obs_len
         self.pred_len = pred_len
         self.action_input_dim = action_input_dim
-        self.action_hidden_dim = action_encoder_hidden_dim
-        self.goal_encoder_input_dim = goal_input_dim
+        self.action_encoder_hidden_dim = action_encoder_hidden_dim
+        self.goal_input_dim = goal_input_dim
         self.goal_encoder_hidden_dim = goal_encoder_hidden_dim
         self.noise_dim = noise_dim
         self.noise_type = noise_type
@@ -489,154 +515,4 @@ class TrajectoryPrediction(nn.Module):
         )
 
         return pred_goal, pred_action
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-class GoalDecoder(nn.Module):
-    def __init__(
-            self, pred_len, goal_decoder_input_dim, goal_decoder_hidden_dim,
-    ):
-        super(GoalDecoder, self).__init__()
-        self.pred_len = pred_len
-        self.goal_decoder_input_dim = goal_decoder_input_dim
-        self.goal_decoder_hidden_dim = goal_decoder_hidden_dim
-
-        self.goalDecoderLSTM = nn.LSTMCell(self.goal_decoder_input_dim, self.goal_decoder_hidden_dim)
-        self.hidden2pos = nn.Linear(self.goal_decoder_hidden_dim, 2)
-        self.inputEmbedding = nn.Linear(2, self.goal_decoder_input_dim)
-
-    def forward(self, goal_real, input_hidden_state, teacher_forcing_ratio):    # 尚缺少加噪声的部分 ?
-        pred_goal = []
-        output = goal_real[-self.pred_len-1]
-        batch = goal_real.shape[1]
-        goal_decoder_hidden_state = input_hidden_state
-        goal_decoder_cell_state = torch.zeros_like(goal_decoder_hidden_state).cuda()
-
-        goal_real_embedding = self.inputEmbedding(goal_real.contiguous().view(-1, 2))
-        goal_real_embedding = goal_real_embedding.view(-1, batch, self.goal_decoder_input_dim)
-
-        if self.training:
-            for i, input_data in enumerate(
-                    goal_real_embedding[-self.pred_len:].chunk(
-                        goal_real_embedding[-self.pred_len:].size(0), dim=0
-                    )
-            ):
-                teacher_forcing = random.random() < teacher_forcing_ratio
-                input_data = input_data if teacher_forcing else output
-                goal_decoder_hidden_state, goal_decoder_cell_state = self.goalDecoderLSTM(
-                    input_data.squeeze(0), (goal_decoder_hidden_state, goal_decoder_cell_state)
-                )
-                output = self.hidden2pos(goal_decoder_hidden_state)
-                pred_goal += [output]
-        else:
-            for i in range(self.pred_len):
-                goal_decoder_hidden_state, goal_decoder_cell_state = self.goalDecoderLSTM(
-                    output, (goal_decoder_hidden_state, goal_decoder_cell_state)
-                )
-                output = self.hidden2pos(goal_decoder_hidden_state)
-                pred_goal += [output]
-
-        # outputs = torch.stack(pred_goal)    # 是否需要这步操作 ?
-        return pred_goal
-
-
-class ActionDecoder(nn.Module):
-    def __init__(
-            self, pred_len, action_decoder_input_dim, action_decoder_hidden_dim,
-            n_units, n_heads, dropout, alpha,
-    ):
-        super(ActionDecoder, self).__init__()
-        self.pred_len = pred_len
-        self.action_decoder_input_dim = action_decoder_input_dim
-        self.action_decoder_hidden_dim = action_decoder_hidden_dim
-
-        self.inputEmbedding = nn.Linear(2, self.action_decoder_input_dim)
-        self.goalAttention = GoalAttention(
-            action_hidden_state_dim=self.action_encoder_hidden_dim,
-        )
-        self.graphAttention = GraphAttention(   # 是否存在问题 ?
-            n_units, n_heads, dropout, alpha
-        )
-        self.actionDecoderLSTM = nn.LSTMCell(self.action_decoder_input_dim, self.action_decoder_hidden_dim)
-        self.hidden2pos = nn.Linear(self.action_decoder_hidden_dim, 2)
-
-    def forward(self, action_real, action_encoder_hidden_state, pred_goal, seq_start_end, teacher_forcing_ratio):
-        pred_action = []
-        output = action_real[-self.pred_len-1]
-        batch = action_real.shape[1]
-        action_decoder_hidden_state = action_encoder_hidden_state
-        action_decoder_cell_state = torch.zeros_like(action_decoder_hidden_state).cuda()
-
-        action_real_embedding = self.inputEmbedding(action_real.contiguous().view(-1, 2))
-        action_real_embedding = action_real_embedding.view(-1, batch, self.action_decoder_input_dim)
-
-        if self.training:
-            for i, input_data in enumerate(
-                action_real_embedding[-self.pred_len :].chunk(
-                    action_real_embedding[-self.pred_len :].size(0), dim=0
-                )
-            ):
-                teacher_forcing = random.random() < teacher_forcing_ratio
-                input_data = input_data if teacher_forcing else output
-                action_decoder_hidden_state, action_decoder_cell_state = self.actionDecoderLSTM(    # LSTM
-                    input_data.squeeze(0), (action_decoder_hidden_state, action_decoder_cell_state)
-                )
-                action_decoder_hidden_state = self.goalAttention(action_decoder_hidden_state, pred_goal[i])   # goal attention
-                action_decoder_hidden_state = self.graphAttention(action_decoder_hidden_state, seq_start_end)     # graph attention
-                output = self.hidden2pos(action_decoder_hidden_state)
-                pred_action += [output]
-        else:
-            for i in range(self.pred_len):
-                action_decoder_hidden_state, action_decoder_cell_state = self.actionDecoderLSTM(  # LSTM
-                    output, (action_decoder_hidden_state, action_decoder_cell_state)
-                )
-                action_decoder_hidden_state = self.goalAttention(action_decoder_hidden_state, pred_goal[i])  # goal attention
-                action_decoder_hidden_state = self.graphAttention(action_decoder_hidden_state, seq_start_end)  # graph attention
-                output = self.hidden2pos(action_decoder_hidden_state)
-                pred_action += [output]
-
-        return pred_action
-
-
-class GoalAttention(nn.Module):
-    """
-    goal 指导生成 action
-    """
-    def __init__(self, action_hidden_state_dim):
-        super(GoalAttention, self).__init__()
-        self.fc = nn.Linear(2, action_hidden_state_dim, bias=True)
-        self.weight = nn.Softmax()
-
-    def forward(self, action_decoder_hidden_state, goal):   # 维度问题,goal是否包含人数这一维度(即1413),此处计算时是否需要加dim= ?
-        return action_decoder_hidden_state.mul(self.weight(self.fc(goal)))
-
-
-class ActionAttention(nn.Module):
-    """
-    action 反作用于 goal, 约束下一时刻的goal
-    """
-    def __init__(self, goal_hidden_state_dim):
-        super(ActionAttention, self).__init__()
-        self.fc = nn.Linear(2, goal_hidden_state_dim, bias=True)
-        self.weight = nn.Softmax()
-
-    def forward(self, goal_decoder_hidden_state, action):   # 是否存在类似维度问题 ?
-        return goal_decoder_hidden_state.mul(self.weight(self.fc(action)))
 

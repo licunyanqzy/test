@@ -78,6 +78,12 @@ def cal_ADE_FDE(pred_traj_gt, pred_traj, consider_ped=None, mode="sum"):
 
 def l2_loss(pred_traj, pred_traj_gt, loss_mask, mode="average"):
     seq_len, batch, _ = pred_traj.size()
+
+    # print(pred_traj.size())
+    # print(pred_traj.device)
+    # print(pred_traj_gt.size())
+    # print(pred_traj_gt.device)
+
     loss = (pred_traj_gt.permute(1, 0, 2) - pred_traj.permute(1, 0, 2)) ** 2
 
     if mode == "sum":
@@ -150,7 +156,7 @@ def relative_to_abs(rel_traj, start_pos):   # 作用 ?
     return abs_traj.permute(1, 0, 2)
 
 
-def cal_goal(traj):                       # Tensor [8, 1413, 2]
+def cal_goal(traj):                       # Tensor [20, 1413, 2]
     seq_len, num, c = traj.size()
 
     action = torch.zeros(seq_len-1, num, c)
@@ -161,13 +167,22 @@ def cal_goal(traj):                       # Tensor [8, 1413, 2]
 
     for j in range(num):
         index = 0
-        for i in range(seq_len - 1):
-            speed = np.linalg.norm(action[i, j, :])
-            turn = np.dot(action[i, j, :], action[i+1, j, :]) / \
-                   (np.linalg.norm(action[i, j, :]) * np.linalg.norm(action[i+1, j, :]))
-            if turn < 0.3 or speed < 0.1:   # 转弯的余弦值小于0.1或速度降为0.01,则认为出现goal, 参数需要是否调整 ?
+
+        for i in range(seq_len - 2):
+            velocity1 = torch.norm(action[i, j, :])
+            velocity2 = torch.norm(action[i+1, j, :])
+
+            if velocity1 < 0.1 or velocity2 < 0.1:     # 速度小于0.1, 参数需要是否调整 ?
                 index = i
-                goal[index:i, j, :] = traj[i, j, :]
+                goal[index:i, j, :] = traj[i + 1, j, :]
+                continue
+
+            turn = torch.dot(action[i, j, :], action[i+1, j, :]) / (velocity1 * velocity2)
+
+            if turn < 0.3:   # 转弯的余弦值小于0.3, 参数需要是否调整 ?
+                index = i
+                goal[index:i, j, :] = traj[i+1, j, :]
+
         goal[index:seq_len, j, :] = traj[-1, j, :]
 
     return goal

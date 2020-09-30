@@ -18,9 +18,9 @@ parser = argparse.ArgumentParser()
 parser.add_argument("--log_dir", default="./", help="Directory containing logging file")
 parser.add_argument("--dataset_name", default="zara2", type=str)
 parser.add_argument("--delim", default="\t")
-parser.add_argument("--loader_num_workers", default=4, type=int)    # The number of background threads to use for data loading
+parser.add_argument("--loader_num_workers", default=8, type=int)    # 4 -> 8 or 16 !
 parser.add_argument("--skip", default=1, type=int)
-parser.add_argument("--batch_size", default=64, type=int)
+parser.add_argument("--batch_size", default=64, type=int)       # 64 -> 128 ! ?
 parser.add_argument("--seed", default=72, type=int)
 
 parser.add_argument("--obs_len", default=8, type=int)
@@ -30,7 +30,7 @@ parser.add_argument("--action_encoder_hidden_dim", default=32, type=int)
 parser.add_argument("--action_input_dim", default=16, type=int)
 parser.add_argument("--goal_input_dim", default=16, type=int)
 parser.add_argument("--goal_encoder_hidden_dim", default=32, type=int)
-parser.add_argument("distance_embedding_dim", default=32, type=int)
+parser.add_argument("--distance_embedding_dim", default=32, type=int)
 
 parser.add_argument("--hidden_units", default="16", type=str)   # n_units
 parser.add_argument("--heads", default="4,1", type=str)   # n_heads
@@ -44,7 +44,7 @@ parser.add_argument("--lr", default=1e-3, type=float)
 parser.add_argument("--start_epoch", default=0, type=int)
 parser.add_argument("--num_epoch", default=400, type=int)
 
-parser.add_argument("--gpu_num", default="1", type=str)
+parser.add_argument("--gpu_num", default="0", type=str)
 parser.add_argument("--use_gpu", default=True, type=bool)
 parser.add_argument("--print_every", default=10, type=int)
 
@@ -78,8 +78,9 @@ def train(args, model, weightLoss, train_loader, optimizer, epoch, writer):
         l2_loss_rel = []
         loss_mask = loss_mask[:, args.obs_len:]
 
-        input_traj = torch.cat((obs_traj_rel, pred_traj_gt_rel), dim=0)
-        input_goal = utils.cal_goal(input_traj)
+        input_traj = torch.cat((obs_traj_rel, pred_traj_gt_rel), dim=0)     # [20,1413,2]
+        input_goal = utils.cal_goal(input_traj)     # [20,1413,2]
+        pred_goal_gt_rel = input_goal[args.obs_len:].cuda()     # [12,1413,2]
 
         pred_goal_fake, pred_action_fake = model(
             input_traj, input_goal, seq_start_end, 1      # teacher_forcing_ratio 的取值 ?
@@ -87,10 +88,9 @@ def train(args, model, weightLoss, train_loader, optimizer, epoch, writer):
 
         # 输入/输出 traj
         pred_traj_fake = pred_action_fake
-        pred_goal_gt = input_goal[args.obs_len:]
 
         l2_traj = utils.l2_loss(pred_traj_fake, pred_traj_gt_rel, loss_mask, mode="raw")
-        l2_goal = utils.l2_loss(pred_goal_fake, pred_goal_gt, loss_mask, mode="raw")
+        l2_goal = utils.l2_loss(pred_goal_fake, pred_goal_gt_rel, loss_mask, mode="raw")
         l2_weight = weightLoss([l2_traj, l2_goal])
         l2_loss_rel.append(l2_weight)
 
@@ -190,7 +190,7 @@ def main(args):
     ]
     n_heads = [int(x) for x in args.heads.strip().split(",")]
 
-    model = TrajectoryPrediction(   # 实例化模型,...
+    model = TrajectoryPrediction(
         obs_len=args.obs_len,
         pred_len=args.pred_len,
         action_input_dim=args.action_input_dim,
