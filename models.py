@@ -195,57 +195,6 @@ class GraphAttentionLayer(nn.Module):
         )
 
 
-class InteractionGate(nn.Module):
-    def __init__(self, distance_embedding_dim, action_decoder_hidden_dim):
-        super(InteractionGate, self).__init__()
-        self.embedding = nn.Linear(1, distance_embedding_dim)
-        self.fc = nn.Linear(
-            distance_embedding_dim * 2 + action_decoder_hidden_dim * 2, action_decoder_hidden_dim
-        )
-        self.gate = nn.Sigmoid()
-
-    def cal_distance(self, a1, a2, g1, g2):
-        dn = (a1[0]-a1[0]) * (g1[1]-g2[1]) - (a1[1]-a2[1]) * (g1[0]-g2[0])
-        n1 = (a1[0]*a2[1] - a1[1]*a2[0]) * (g1[0]-g2[0]) - (a1[0]-a2[0]) * (g1[0]*g2[1] - g1[0]*g2[0])
-        n2 = (a1[0]*a2[1] - a1[1]*a2[0]) * (g1[1]-g2[1]) - (a1[1]-a2[0]) * (g1[0]*g2[1] - g1[0]*g2[0])
-
-        d1 = torch.norm(a1 - g1)
-        d2 = torch.norm(a2 - g2)
-
-        if not dn == 0:
-            p1 = n1 / dn
-            p2 = n2 / dn
-            if (a1[0] - p1) * (p1 - g1[0]) > 0:
-                d1 = torch.norm(a1 - [p1, p2])
-                d2 = torch.norm(a2 - [p1, p2])
-
-        return d1.unsqueeze(0), d2.unsqueeze(0)
-
-    def forward(self, action_hidden_state, goal_hidden_state, goal, position, idx):
-        n = goal.size()[0]
-
-        for i in range(n):
-            d1, d2 = self.cal_distance(position[idx], goal[i], position[idx], position[i])
-            if i == idx:
-                continue
-
-            d1_embedding = self.embedding(d1)
-            d2_embedding = self.embedding(d2)
-            fc_input = torch.cat(
-                [action_hidden_state[idx], action_hidden_state[i], d1_embedding, d2_embedding], dim=0
-            )
-            action_hidden_state[i] = self.gate(self.fc(fc_input))
-
-        d = torch.norm(position[idx] - goal[idx]).unsqueeze(0)
-        d_embedding = self.embedding(d)
-        fc_input = torch.cat(
-            [action_hidden_state[idx], goal_hidden_state, d_embedding, d_embedding], dim=0
-        )
-        goal_hidden_state = self.gate(self.fc(fc_input))
-
-        return action_hidden_state, goal_hidden_state
-
-
 class GAT(nn.Module):
     def __init__(
             self, distance_embedding_dim, action_decoder_hidden_dim,
@@ -254,24 +203,56 @@ class GAT(nn.Module):
         super(GAT, self).__init__()
         self.n_heads = 4
 
+        self.embedding = nn.Linear(1, distance_embedding_dim)
+        self.fc = nn.Linear(
+            distance_embedding_dim * 2 + action_decoder_hidden_dim * 2, action_decoder_hidden_dim
+        )
+        self.gate = nn.Sigmoid()
+
         self.gatLayer = GraphAttentionLayer(
             n_head=self.n_heads, f_in=action_decoder_hidden_dim,
             f_out=action_decoder_hidden_dim, attn_dropout=dropout,
         )
-        self.interactionGate = InteractionGate(distance_embedding_dim, action_decoder_hidden_dim)
 
     def cal_dist(self, goal, action):
-        distance = torch.zeros()
+        n = goal.size()[0]
+        distance = torch.zeros([n, n])
+        for i in range(n):
+            for j in range(i, n):
+                if i == j:
+                    distance[i, j] = torch.norm(action[i] - goal[i])
+                else:
+                    a1, a2, g1, g2 = action[i], action[j], goal[i], goal[j]
+                    dn = (a1[0] - a1[0]) * (g1[1] - g2[1]) - (a1[1] - a2[1]) * (g1[0] - g2[0])
+                    n1 = (a1[0] * a2[1] - a1[1] * a2[0]) * (g1[0] - g2[0]) - (a1[0] - a2[0]) * (
+                                g1[0] * g2[1] - g1[0] * g2[0])
+                    n2 = (a1[0] * a2[1] - a1[1] * a2[0]) * (g1[1] - g2[1]) - (a1[1] - a2[0]) * (
+                                g1[0] * g2[1] - g1[0] * g2[0])
+
+                    d1 = torch.norm(a1 - g1)
+                    d2 = torch.norm(a2 - g2)
+                    if not dn == 0:
+                        p1 = n1 / dn
+                        p2 = n2 / dn
+                        if (a1[0] - p1) * (p1 - g1[0]) > 0:
+                            d1 = torch.norm(a1 - [p1, p2])
+                            d2 = torch.norm(a2 - [p1, p2])
+
+                    distance[i, j] = d1
+                    distance[j, i] = d2
+        return distance
 
     def forward(self, action_hidden_state, goal_hidden_state, goal, action):
         # 只能进行一层GAT, 如何实现两层 ? to be continued ...
 
         n = action_hidden_state.size()[0]
         outputs = []
+        distance = self.cal_dist(goal, action)
+
         for idx in range(n):
-            curr_action, curr_goal = self.interactionGate(
-                action_hidden_state, goal_hidden_state[idx], goal, action, idx
-            )
+
+            # to be continued ...
+
             gat_input = torch.cat([curr_action, curr_goal.unsqueeze(0)])
             gat_output = self.gatLayer(gat_input, idx)
             gat_output = F.elu(gat_output)
@@ -515,4 +496,58 @@ class TrajectoryPrediction(nn.Module):
         )
 
         return pred_goal, pred_action
+
+
+
+
+
+class InteractionGate(nn.Module):
+    def __init__(self, distance_embedding_dim, action_decoder_hidden_dim):
+        super(InteractionGate, self).__init__()
+        self.embedding = nn.Linear(1, distance_embedding_dim)
+        self.fc = nn.Linear(
+            distance_embedding_dim * 2 + action_decoder_hidden_dim * 2, action_decoder_hidden_dim
+        )
+        self.gate = nn.Sigmoid()
+
+    def cal_distance(self, a1, a2, g1, g2):
+        dn = (a1[0]-a1[0]) * (g1[1]-g2[1]) - (a1[1]-a2[1]) * (g1[0]-g2[0])
+        n1 = (a1[0]*a2[1] - a1[1]*a2[0]) * (g1[0]-g2[0]) - (a1[0]-a2[0]) * (g1[0]*g2[1] - g1[0]*g2[0])
+        n2 = (a1[0]*a2[1] - a1[1]*a2[0]) * (g1[1]-g2[1]) - (a1[1]-a2[0]) * (g1[0]*g2[1] - g1[0]*g2[0])
+
+        d1 = torch.norm(a1 - g1)
+        d2 = torch.norm(a2 - g2)
+
+        if not dn == 0:
+            p1 = n1 / dn
+            p2 = n2 / dn
+            if (a1[0] - p1) * (p1 - g1[0]) > 0:
+                d1 = torch.norm(a1 - [p1, p2])
+                d2 = torch.norm(a2 - [p1, p2])
+
+        return d1.unsqueeze(0), d2.unsqueeze(0)
+
+    def forward(self, action_hidden_state, goal_hidden_state, goal, position, idx):
+        n = goal.size()[0]
+
+        for i in range(n):
+            d1, d2 = self.cal_distance(position[idx], goal[i], position[idx], position[i])
+            if i == idx:
+                continue
+
+            d1_embedding = self.embedding(d1)
+            d2_embedding = self.embedding(d2)
+            fc_input = torch.cat(
+                [action_hidden_state[idx], action_hidden_state[i], d1_embedding, d2_embedding], dim=0
+            )
+            action_hidden_state[i] = self.gate(self.fc(fc_input))
+
+        d = torch.norm(position[idx] - goal[idx]).unsqueeze(0)
+        d_embedding = self.embedding(d)
+        fc_input = torch.cat(
+            [action_hidden_state[idx], goal_hidden_state, d_embedding, d_embedding], dim=0
+        )
+        goal_hidden_state = self.gate(self.fc(fc_input))
+
+        return action_hidden_state, goal_hidden_state
 
