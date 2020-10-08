@@ -55,8 +55,8 @@ bestADE = 100
 
 
 def train(args, model, weightLoss, train_loader, optimizer, epoch, writer):
-    losses = utils.AverageMeter("Loss", ":.6f")     # 作用 ?
-    progress = utils.ProgressMeter(                 # 作用 ?
+    losses = utils.AverageMeter("Loss", ":.6f")
+    progress = utils.ProgressMeter(
         len(train_loader), [losses], prefix="Epoch: [{}]".format(epoch)
     )
 
@@ -82,33 +82,35 @@ def train(args, model, weightLoss, train_loader, optimizer, epoch, writer):
         input_goal = utils.cal_goal(input_traj)     # [20,1413,2]
         pred_goal_gt_rel = input_goal[args.obs_len:].cuda()     # [12,1413,2]
 
-        pred_goal_fake, pred_action_fake = model(
+        pred_goal_fake, pred_action_fake = model(         # [12,1413,2] [12,1413,2]
             input_traj, input_goal, seq_start_end, 1      # teacher_forcing_ratio 的取值 ?
         )
 
         # 输入/输出 traj
         pred_traj_fake = pred_action_fake
 
-        l2_traj = utils.l2_loss(pred_traj_fake, pred_traj_gt_rel, loss_mask, mode="raw")
-        l2_goal = utils.l2_loss(pred_goal_fake, pred_goal_gt_rel, loss_mask, mode="raw")
-        l2_weight = weightLoss([l2_traj, l2_goal])
-        l2_loss_rel.append(l2_weight)
-
-        l2_loss_sum_rel = torch.zeros(1).to(pred_traj_gt)
-        l2_loss_rel = torch.stack(l2_loss_rel, dim=1)
+        l2_traj = utils.l2_loss(pred_traj_fake, pred_traj_gt_rel, loss_mask, mode="raw").unsqueeze(1)
+        l2_goal = utils.l2_loss(pred_goal_fake, pred_goal_gt_rel, loss_mask, mode="raw").unsqueeze(1)
+        l2_traj_sum = torch.zeros(1).to(pred_traj_gt)
+        l2_goal_sum = torch.zeros(1).to(pred_traj_gt)
         for start, end in seq_start_end.data:
-            _l2_loss_rel = torch.narrow(l2_loss_rel, 0, start, end-start)
-            _l2_loss_rel = torch.sum(_l2_loss_rel, dim=0)
-            _l2_loss_rel = torch.min(_l2_loss_rel) / ((pred_traj_fake.shape[0]) * (end-start))
-            l2_loss_sum_rel += _l2_loss_rel
+            _l2_traj = torch.narrow(l2_traj, 0, start, end-start)
+            _l2_goal = torch.narrow(l2_goal, 0, start, end-start)
+            _l2_traj = torch.sum(_l2_traj, dim=0)
+            _l2_goal = torch.sum(_l2_goal, dim=0)
+            _l2_traj = torch.min(_l2_traj) / (pred_traj_fake.shape[0] * (end-start))
+            _l2_goal = torch.min(_l2_goal) / (pred_goal_fake.shape[0] * (end-start))
+            l2_traj_sum += _l2_traj
+            l2_goal_sum += _l2_goal
 
-        loss += l2_loss_sum_rel
+        l2_weight = weightLoss([l2_traj_sum, l2_goal_sum])
+        loss += l2_weight
         losses.update(loss.item(), obs_traj.shape[1])
         loss.backward()
         optimizer.step()
 
-        if batch_idx % args.print_every:
-            progress.display(batch_idx)
+        # if batch_idx % args.print_every:
+        progress.display(batch_idx)
 
     writer.add_scalar("train_loss", losses.avg, epoch)
 

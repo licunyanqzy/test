@@ -204,10 +204,10 @@ class GAT(nn.Module):
         self.n_heads = 4
 
         self.embedding = nn.Linear(1, distance_embedding_dim)
-        self.fc = nn.Linear(
-            distance_embedding_dim * 2 + action_decoder_hidden_dim * 2, action_decoder_hidden_dim
+        self.interactionGate = nn.Sequential(
+            nn.Linear(distance_embedding_dim * 2 + action_decoder_hidden_dim * 2, action_decoder_hidden_dim),
+            nn.Sigmoid()
         )
-        self.gate = nn.Sigmoid()
 
         self.gatLayer = GraphAttentionLayer(
             n_head=self.n_heads, f_in=action_decoder_hidden_dim,
@@ -216,7 +216,7 @@ class GAT(nn.Module):
 
     def cal_dist(self, goal, action):
         n = goal.size()[0]
-        distance = torch.zeros([n, n])
+        distance = torch.zeros([n, n]).cuda()
         for i in range(n):
             for j in range(i, n):
                 if i == j:
@@ -234,9 +234,10 @@ class GAT(nn.Module):
                     if not dn == 0:
                         p1 = n1 / dn
                         p2 = n2 / dn
+                        p = torch.tensor([p1, p2]).cuda()
                         if (a1[0] - p1) * (p1 - g1[0]) > 0:
-                            d1 = torch.norm(a1 - [p1, p2])
-                            d2 = torch.norm(a2 - [p1, p2])
+                            d1 = torch.norm(a1 - p)
+                            d2 = torch.norm(a2 - p)
 
                     distance[i, j] = d1
                     distance[j, i] = d2
@@ -250,10 +251,30 @@ class GAT(nn.Module):
         distance = self.cal_dist(goal, action)
 
         for idx in range(n):
+            curr_action_hidden_state = []
+            for i in range(n):
+                if i == idx:
+                    d_embedding = self.embedding(distance[i, i].unsqueeze(0))
+                    gate = self.interactionGate(
+                        torch.cat([
+                            action_hidden_state[idx], goal_hidden_state[idx], d_embedding, d_embedding
+                        ], dim=0)
+                    )
+                    curr_goal_hidden_state = goal_hidden_state[idx] * gate
+                    curr_action_hidden_state += [action_hidden_state[idx]]
+                else:
+                    d1_embedding = self.embedding(distance[idx, i].unsqueeze(0))
+                    d2_embedding = self.embedding(distance[i, idx].unsqueeze(0))
+                    gate = self.interactionGate(
+                        torch.cat([
+                            action_hidden_state[idx], action_hidden_state[i], d1_embedding, d2_embedding
+                        ], dim=0)
+                    )
+                    gated_hidden_state = action_hidden_state[i] * gate
+                    curr_action_hidden_state += [gated_hidden_state]
 
-            # to be continued ...
-
-            gat_input = torch.cat([curr_action, curr_goal.unsqueeze(0)])
+            curr_action_hidden_state = torch.stack(curr_action_hidden_state)
+            gat_input = torch.cat([curr_action_hidden_state, curr_goal_hidden_state.unsqueeze(0)])
             gat_output = self.gatLayer(gat_input, idx)
             gat_output = F.elu(gat_output)
             outputs += [gat_output[idx]]
@@ -317,13 +338,6 @@ class Decoder(nn.Module):
         self.actionEmbedding = nn.Linear(2, self.action_decoder_input_dim)
         self.hidden2action = nn.Linear(self.action_decoder_hidden_dim, 2)
 
-        # self.goalAttention = GoalAttention(
-        #     action_hidden_state_dim=self.action_encoder_hidden_dim,
-        # )
-        # self.actionAttention = ActionAttention(
-        #     goal_hidden_state_dim=self.goal_decoder_hidden_dim,
-        # )
-
         self.attention = Attention(  # 是否存在问题 ?
             self.distance_embedding_dim, self.action_decoder_hidden_dim, n_units, n_heads, dropout, alpha
         )
@@ -346,29 +360,12 @@ class Decoder(nn.Module):
         action_real_embedding = self.actionEmbedding(action_real.contiguous().view(-1, 2))
         action_real_embedding = action_real_embedding.view(-1, batch, self.action_decoder_input_dim)
 
-        # action_real_embedding_chunk = action_real_embedding[-self.pred_len:].chunk(
-        #     action_real_embedding[-self.pred_len:].size(0), dim=0
-        # )
-        # goal_real_embedding = self.goalEmbedding(goal_real.contiguous().view(-1, 2))
-        # goal_real_embedding = goal_real_embedding.view(-1, batch, self.goal_decoder_input_dim)
-        # goal_real_embedding_chunk = goal_real_embedding[-self.pred_len:].chunk(
-        #     goal_real_embedding[-self.pred_len:].size(0), dim=0
-        # )
-
         if self.training:
             for i, input_data in enumerate(
               action_real_embedding[-self.pred_len:].chunk(
                   action_real_embedding[-self.pred_len:].size(0), dim=0
               )
             ):
-                # action_input_data = action_real_embedding_chunk[i]
-                # goal_input_data = goal_real_embedding_chunk[i]
-
-                # goal_output_embedding = self.goalEmbedding(goal_output.contiguous().view(-1, 2))
-                # goal_output_embedding = goal_output_embedding.view(-1, batch, self.goal_decoder_input_dim)
-                # action_output_embedding = self.actionEmbedding(action_output.contiguous().view(-1, 2))
-                # action_output_embedding = action_output_embedding.view(-1, batch, self.action_decoder_input_dim)
-
                 teacher_forcing = random.random() < teacher_forcing_ratio
                 if teacher_forcing:
                     goal_input_data = input_data
