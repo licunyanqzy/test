@@ -6,10 +6,11 @@ import torch.optim as optim
 from torch.utils.tensorboard import SummaryWriter
 import os
 import logging
+import line_profiler
+import torchprof
 
 from data.loader import data_loader
 from models import TrajectoryPrediction
-from models import AutomaticWeightLoss
 import utils
 from utils import int_tuple
 
@@ -18,7 +19,7 @@ parser = argparse.ArgumentParser()
 parser.add_argument("--log_dir", default="./", help="Directory containing logging file")
 parser.add_argument("--dataset_name", default="zara2", type=str)
 parser.add_argument("--delim", default="\t")
-parser.add_argument("--loader_num_workers", default=8, type=int)    # 4 -> 8 or 16 !
+parser.add_argument("--loader_num_workers", default=0, type=int)    # 4 -> 8 or 16 !
 parser.add_argument("--skip", default=1, type=int)
 parser.add_argument("--batch_size", default=64, type=int)       # 64 -> 128 ! ?
 parser.add_argument("--seed", default=72, type=int)
@@ -54,7 +55,7 @@ parser.add_argument("--resume", default="", type=str)
 bestADE = 100
 
 
-def train(args, model, weightLoss, train_loader, optimizer, epoch, writer):
+def train(args, model, sigma, train_loader, optimizer, epoch, writer):
     losses = utils.AverageMeter("Loss", ":.6f")
     progress = utils.ProgressMeter(
         len(train_loader), [losses], prefix="Epoch: [{}]".format(epoch)
@@ -80,10 +81,10 @@ def train(args, model, weightLoss, train_loader, optimizer, epoch, writer):
 
         input_traj = torch.cat((obs_traj_rel, pred_traj_gt_rel), dim=0)     # [20,1413,2]
         input_goal = utils.cal_goal(input_traj)     # [20,1413,2]
-        pred_goal_gt_rel = input_goal[args.obs_len:].cuda()     # [12,1413,2]
+        pred_goal_gt_rel = input_goal[args.obs_len:]     # [12,1413,2]
 
-        pred_goal_fake, pred_action_fake = model(         # [12,1413,2] [12,1413,2]
-            input_traj, input_goal, seq_start_end, 1      # teacher_forcing_ratio 的取值 ?
+        pred_goal_fake, pred_action_fake = model(       # [12,1413,2] [12,1413,2]
+            input_traj, input_goal, seq_start_end, 1    # teacher_forcing_ratio 的取值 ?
         )
 
         # 输入/输出 traj
@@ -103,7 +104,13 @@ def train(args, model, weightLoss, train_loader, optimizer, epoch, writer):
             l2_traj_sum += _l2_traj
             l2_goal_sum += _l2_goal
 
-        l2_weight = weightLoss([l2_traj_sum, l2_goal_sum])
+        l2_weight = 0.5 / (sigma[0] ** 2) * l2_traj_sum + 0.5 / (sigma[1] ** 2) * l2_goal_sum \
+            + torch.log(sigma[0]) + torch.log(sigma[1])
+
+        print(l2_goal_sum)
+        print(l2_traj_sum)
+        print(l2_weight)
+
         loss += l2_weight
         losses.update(loss.item(), obs_traj.shape[1])
         loss.backward()
@@ -208,15 +215,10 @@ def main(args):
         noise_type=args.noise_type,
     )
     model.cuda()
-    weightLoss = AutomaticWeightLoss(num=2)
-    weightLoss.cuda()
-    optimizer = optim.Adam(     # 是否需要为每个模块单独设置参数 ?
-        [
-            {"params": model.parameters()},
-            {"params": weightLoss.parameters()}
-        ],
-        lr=args.lr
-    )
+    sigma1 = torch.ones((1,), requires_grad=True)
+    sigma2 = torch.ones((1,), requires_grad=True)
+    params = ([p for p in model.parameters()] + [sigma1] + [sigma2])
+    optimizer = optim.Adam(params, lr=args.lr)     # 是否需要为每个模块单独设置参数 ?
 
     if args.resume:     # start from checkpoint
         if os.path.isfile(args.resume):
@@ -235,7 +237,8 @@ def main(args):
     global bestADE
 
     for epoch in range(args.start_epoch, args.num_epoch):
-        train(args, model, weightLoss, train_loader, optimizer, epoch, writer)
+        sigma = [sigma1.cuda(), sigma2.cuda()]
+        train(args, model, sigma, train_loader, optimizer, epoch, writer)
 
         ADE = validate(args, model, val_loader, epoch, writer)
         is_best = ADE > bestADE

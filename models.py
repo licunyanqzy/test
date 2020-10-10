@@ -4,6 +4,7 @@ import torch.nn.functional as F
 import random
 import numpy as np
 import os
+import line_profiler
 
 
 def get_noise(shape, noise_type):
@@ -29,19 +30,6 @@ def make_mlp(dim_list, activation="relu", batch_norm=True, dropout=0):
     return nn.Sequential(*layers)
 
 
-class AutomaticWeightLoss(nn.Module):
-    def __init__(self, num=2):
-        super(AutomaticWeightLoss, self).__init__()
-        params = torch.ones(num, requires_grad=True)    # 初始值如何设置 ?
-        self.params = nn.Parameter(params)
-
-    def forward(self, loss):
-        weight_loss = 0
-        for i in range(len(loss)):
-            weight_loss += 0.5 / (self.params[i] ** 2) * loss[i] + torch.log(self.params[i])
-        return weight_loss
-
-
 class ActionEncoder(nn.Module):
     def __init__(
             self, obs_len, action_encoder_input_dim, action_encoder_hidden_dim,
@@ -64,7 +52,7 @@ class ActionEncoder(nn.Module):
         batch = obs_traj.shape[1]
         action_encoder_hidden_state, action_encoder_cell_state = self.init_hidden(batch)
 
-        obs_traj_embedding = self.inputEmbedding(obs_traj.contiguous().view(-1,2))
+        obs_traj_embedding = self.inputEmbedding(obs_traj.contiguous().view(-1, 2))
         obs_traj_embedding = obs_traj_embedding.view(-1, batch, self.action_encoder_input_dim)
 
         for i, input_data in enumerate(
@@ -150,10 +138,10 @@ class GraphAttentionLayer(nn.Module):
 
         n = h.size()[0]
 
-        # print(h.size())
-        # print(self.w.size())
-        # print(self.a_src.size())
-        # print(self.a_dst.size())
+        # print(h.size())               [22,48]
+        # print(self.w.size())          [4,48,48]
+        # print(self.a_src.size())      [4,48,1]
+        # print(self.a_dst.size())      [4,48,1]
 
         h_prime = torch.matmul(h, self.w)
         attn_src = torch.matmul(h_prime, self.a_src)
@@ -161,9 +149,9 @@ class GraphAttentionLayer(nn.Module):
         attn = attn_src.expand(-1, -1, n) + attn_dst.expand(-1, -1, n).permute(0, 2, 1)     # 作用 ?
 
         # print("\n")
-        # print(attn_src.size())
-        # print(attn_dst.size())
-        # print(attn.size())
+        # print(attn_src.size())    [4,22,1]
+        # print(attn_dst.size())    [4,22,1]
+        # print(attn.size())        [4,22,22]
         # print("\n")
 
         attn = self.leaky_relu(attn)
@@ -172,9 +160,9 @@ class GraphAttentionLayer(nn.Module):
         output = torch.matmul(attn, h_prime)
         output_mean = torch.mean(output, dim=0)
 
-        # print(attn.size())
-        # print(output.size())
-        # print(output_mean.size())
+        # print(attn.size())            [4,22,22]
+        # print(output.size())          [4,22,48]
+        # print(output_mean.size())     [22,48]
         # os._exit(0)
 
         if self.bias is not None:
@@ -195,32 +183,27 @@ class GraphAttentionLayer(nn.Module):
         )
 
 
-class GAT(nn.Module):
-    def __init__(
-            self, distance_embedding_dim, action_decoder_hidden_dim,
-            n_units, n_heads, dropout=0.2, alpha=0.2,
-    ):
-        super(GAT, self).__init__()
-        self.n_heads = 4
+class InteractionGate(nn.Module):
+    def __init__(self, distance_embedding_dim, action_decoder_hidden_dim, ):
+        super(InteractionGate, self).__init__()
+        self.distance_embedding_dim = distance_embedding_dim
+        self.action_decoder_hidden_dim = action_decoder_hidden_dim
 
-        self.embedding = nn.Linear(1, distance_embedding_dim)
-        self.interactionGate = nn.Sequential(
-            nn.Linear(distance_embedding_dim * 2 + action_decoder_hidden_dim * 2, action_decoder_hidden_dim),
-            nn.Sigmoid()
+        self.distEmbedding = nn.Linear(1, self.distance_embedding_dim)
+        self.gateStep1 = nn.Linear(
+            distance_embedding_dim * 2 + action_decoder_hidden_dim * 2, action_decoder_hidden_dim
         )
-
-        self.gatLayer = GraphAttentionLayer(
-            n_head=self.n_heads, f_in=action_decoder_hidden_dim,
-            f_out=action_decoder_hidden_dim, attn_dropout=dropout,
-        )
+        self.gateStep2 = nn.Sigmoid()
 
     def cal_dist(self, goal, action):
         n = goal.size()[0]
-        distance = torch.zeros([n, n]).cuda()
+        distance_other = torch.zeros([n, n]).cuda()
+        distance_self = torch.zeros([n, n])
         for i in range(n):
             for j in range(i, n):
                 if i == j:
-                    distance[i, j] = torch.norm(action[i] - goal[i])
+                    distance_other[i, j] = torch.norm(action[i] - goal[i])
+                    distance_self[i] = distance_other[i, j]
                 else:
                     a1, a2, g1, g2 = action[i], action[j], goal[i], goal[j]
                     dn = (a1[0] - a1[0]) * (g1[1] - g2[1]) - (a1[1] - a2[1]) * (g1[0] - g2[0])
@@ -239,48 +222,66 @@ class GAT(nn.Module):
                             d1 = torch.norm(a1 - p)
                             d2 = torch.norm(a2 - p)
 
-                    distance[i, j] = d1
-                    distance[j, i] = d2
-        return distance
+                    distance_other[i, j] = d1
+                    distance_other[j, i] = d2
+        return distance_self, distance_other
+
+    def forward(self, action_hidden_state, goal_hidden_state, goal, action, ):
+        num = goal.size()[0]
+        distance_self, distance_other = self.cal_dist(goal, action)      # [21,21]
+        distance_other_embedding = self.distEmbedding(distance_other.contiguous().view(-1, 1))
+        distance_other_embedding = distance_other_embedding.view(num, num, self.distance_embedding_dim)
+        distance_self_embedding = self.distEmbedding(distance_self.contiguous().view(-1 ,1))
+        distance_self_embedding = distance_self_embedding.view(num, num, self.distance_embedding_dim)
+
+        temp_action = action_hidden_state.repeat(num, 1).view(num, num, -1)
+        temp_goal = goal_hidden_state.repeat(num, 1).view(num, num, -1)     # [21,21,48]
+        mask_goal = torch.ones([num, num]).cuda()
+        mask_goal = torch.triu(mask_goal, 0) - torch.triu(mask_goal, 1)    # [21,21]
+        mask_goal = mask_goal.unsqueeze(2).expand(num, num, self.action_decoder_hidden_dim)
+        mask_action = torch.ones([num, num]).cuda()
+        mask_action = torch.triu(mask_action, 1) + torch.tril(mask_action, -1)
+        mask_action = mask_action.unsqueeze(2).expand(num, num, self.action_decoder_hidden_dim)
+        goal_action = temp_goal * mask_goal + temp_action * mask_action
+
+        gate = self.gateStep1(torch.cat(
+            [temp_action, goal_action, distance_self_embedding, distance_other_embedding], dim=0
+        ))
+        gate = self.gateStep2(gate)     # [21,21,48]
+        output = goal_action * gate
+
+        return output
+
+
+class GAT(nn.Module):
+    def __init__(
+            self, distance_embedding_dim, action_decoder_hidden_dim,
+            n_units, n_heads, dropout=0.2, alpha=0.2,
+    ):
+        super(GAT, self).__init__()
+        self.n_heads = 4
+
+        self.interactionGate = InteractionGate(
+            distance_embedding_dim=distance_embedding_dim, action_decoder_hidden_dim=action_decoder_hidden_dim
+        )
+
+        self.gatLayer = GraphAttentionLayer(
+            n_head=self.n_heads, f_in=action_decoder_hidden_dim,
+            f_out=action_decoder_hidden_dim, attn_dropout=dropout,
+        )
 
     def forward(self, action_hidden_state, goal_hidden_state, goal, action):
         # 只能进行一层GAT, 如何实现两层 ? to be continued ...
-
         n = action_hidden_state.size()[0]
-        outputs = []
-        distance = self.cal_dist(goal, action)
 
-        for idx in range(n):
-            curr_action_hidden_state = []
-            for i in range(n):
-                if i == idx:
-                    d_embedding = self.embedding(distance[i, i].unsqueeze(0))
-                    gate = self.interactionGate(
-                        torch.cat([
-                            action_hidden_state[idx], goal_hidden_state[idx], d_embedding, d_embedding
-                        ], dim=0)
-                    )
-                    curr_goal_hidden_state = goal_hidden_state[idx] * gate
-                    curr_action_hidden_state += [action_hidden_state[idx]]
-                else:
-                    d1_embedding = self.embedding(distance[idx, i].unsqueeze(0))
-                    d2_embedding = self.embedding(distance[i, idx].unsqueeze(0))
-                    gate = self.interactionGate(
-                        torch.cat([
-                            action_hidden_state[idx], action_hidden_state[i], d1_embedding, d2_embedding
-                        ], dim=0)
-                    )
-                    gated_hidden_state = action_hidden_state[i] * gate
-                    curr_action_hidden_state += [gated_hidden_state]
+        gated_hidden_state = self.interactionGate(
+            action_hidden_state, goal_hidden_state, goal, action
+        )   # [21,21,48]
 
-            curr_action_hidden_state = torch.stack(curr_action_hidden_state)
-            gat_input = torch.cat([curr_action_hidden_state, curr_goal_hidden_state.unsqueeze(0)])
-            gat_output = self.gatLayer(gat_input, idx)
-            gat_output = F.elu(gat_output)
-            outputs += [gat_output[idx]]
+        gate_layer_input = torch.cat([action_hidden_state.unsqueeze(1), gated_hidden_state], dim=1)
+        output = self.gatLayer(gate_layer_input)    # to be continued ...
 
-        outputs = torch.stack(outputs)
-        return outputs
+        return output
 
 
 class Attention(nn.Module):
@@ -357,8 +358,8 @@ class Decoder(nn.Module):
         goal_output = goal_real[self.obs_len - 1]
 
         batch = action_real.shape[1]
-        action_real_embedding = self.actionEmbedding(action_real.contiguous().view(-1, 2))
-        action_real_embedding = action_real_embedding.view(-1, batch, self.action_decoder_input_dim)
+        action_real_embedding = self.actionEmbedding(action_real.contiguous().view(-1, 2))    # [28260, 16]
+        action_real_embedding = action_real_embedding.view(-1, batch, self.action_decoder_input_dim)  # [20,1413,16]
 
         if self.training:
             for i, input_data in enumerate(
@@ -493,58 +494,4 @@ class TrajectoryPrediction(nn.Module):
         )
 
         return pred_goal, pred_action
-
-
-
-
-
-class InteractionGate(nn.Module):
-    def __init__(self, distance_embedding_dim, action_decoder_hidden_dim):
-        super(InteractionGate, self).__init__()
-        self.embedding = nn.Linear(1, distance_embedding_dim)
-        self.fc = nn.Linear(
-            distance_embedding_dim * 2 + action_decoder_hidden_dim * 2, action_decoder_hidden_dim
-        )
-        self.gate = nn.Sigmoid()
-
-    def cal_distance(self, a1, a2, g1, g2):
-        dn = (a1[0]-a1[0]) * (g1[1]-g2[1]) - (a1[1]-a2[1]) * (g1[0]-g2[0])
-        n1 = (a1[0]*a2[1] - a1[1]*a2[0]) * (g1[0]-g2[0]) - (a1[0]-a2[0]) * (g1[0]*g2[1] - g1[0]*g2[0])
-        n2 = (a1[0]*a2[1] - a1[1]*a2[0]) * (g1[1]-g2[1]) - (a1[1]-a2[0]) * (g1[0]*g2[1] - g1[0]*g2[0])
-
-        d1 = torch.norm(a1 - g1)
-        d2 = torch.norm(a2 - g2)
-
-        if not dn == 0:
-            p1 = n1 / dn
-            p2 = n2 / dn
-            if (a1[0] - p1) * (p1 - g1[0]) > 0:
-                d1 = torch.norm(a1 - [p1, p2])
-                d2 = torch.norm(a2 - [p1, p2])
-
-        return d1.unsqueeze(0), d2.unsqueeze(0)
-
-    def forward(self, action_hidden_state, goal_hidden_state, goal, position, idx):
-        n = goal.size()[0]
-
-        for i in range(n):
-            d1, d2 = self.cal_distance(position[idx], goal[i], position[idx], position[i])
-            if i == idx:
-                continue
-
-            d1_embedding = self.embedding(d1)
-            d2_embedding = self.embedding(d2)
-            fc_input = torch.cat(
-                [action_hidden_state[idx], action_hidden_state[i], d1_embedding, d2_embedding], dim=0
-            )
-            action_hidden_state[i] = self.gate(self.fc(fc_input))
-
-        d = torch.norm(position[idx] - goal[idx]).unsqueeze(0)
-        d_embedding = self.embedding(d)
-        fc_input = torch.cat(
-            [action_hidden_state[idx], goal_hidden_state, d_embedding, d_embedding], dim=0
-        )
-        goal_hidden_state = self.gate(self.fc(fc_input))
-
-        return action_hidden_state, goal_hidden_state
 

@@ -78,12 +78,6 @@ def cal_ADE_FDE(pred_traj_gt, pred_traj, consider_ped=None, mode="sum"):
 
 def l2_loss(pred_traj, pred_traj_gt, loss_mask, mode="average"):
     seq_len, batch, _ = pred_traj.size()
-
-    # print(pred_traj.size())
-    # print(pred_traj.device)
-    # print(pred_traj_gt.size())
-    # print(pred_traj_gt.device)
-
     loss = (pred_traj_gt.permute(1, 0, 2) - pred_traj.permute(1, 0, 2)) ** 2
 
     if mode == "sum":
@@ -163,7 +157,7 @@ def cal_goal(traj):                       # Tensor [20, 1413, 2]
     for i in range(seq_len - 1):
         action[i, :, :] = traj[i + 1, :, :] - traj[i, :, :]
 
-    goal = torch.zeros(seq_len, num, c)
+    goal = torch.zeros(seq_len, num, c).cuda()
 
     for j in range(num):
         index = 0
