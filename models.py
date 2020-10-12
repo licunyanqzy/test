@@ -80,6 +80,7 @@ class GoalEncoder(nn.Module):
         self.inputEmbedding = nn.Linear(2, self.goal_encoder_input_dim)
 
         self.hidden2goal = nn.Linear(goal_encoder_hidden_dim, 2)    # for experiment_goal
+        self.flag = 0
 
     def init_hidden(self, batch):
         return (
@@ -88,10 +89,17 @@ class GoalEncoder(nn.Module):
         )
 
     def forward(self, obs_goal):    # 先embedding,后LSTM,可能存在维度问题 ?
+        self.flag += 1
+
         batch = obs_goal.shape[1]
         goal_encoder_hidden_state, goal_encoder_cell_state = self.init_hidden(batch)
 
         obs_goal_embedding = self.inputEmbedding(obs_goal.contiguous().view(-1, 2))
+
+        # if self.flag == 2:
+        #     print(obs_goal_embedding)
+        #     os._exit(0)
+
         obs_goal_embedding = obs_goal_embedding.view(-1, batch, self.goal_encoder_input_dim)
 
         for i, input_data in enumerate(
@@ -115,9 +123,9 @@ class GraphAttentionLayer(nn.Module):
         self.f_in = f_in
         self.f_out = f_out
 
-        self.w = nn.Parameter(torch.Tensor(n_head, f_in, f_out))
-        self.a_src = nn.Parameter(torch.Tensor(n_head, f_out, 1))
-        self.a_dst = nn.Parameter(torch.Tensor(n_head, f_out, 1))
+        self.w = nn.Parameter(torch.Tensor(n_head, 1, f_in, f_out))
+        self.a_src = nn.Parameter(torch.Tensor(n_head, 1, f_out, 1))
+        self.a_dst = nn.Parameter(torch.Tensor(n_head, 1, f_out, 1))
 
         self.leaky_relu = nn.LeakyReLU(negative_slope=0.2)
         self.softmax = nn.Softmax(dim=-1)
@@ -132,26 +140,28 @@ class GraphAttentionLayer(nn.Module):
         nn.init.xavier_uniform_(self.a_src, gain=1.414)
         nn.init.xavier_uniform_(self.a_dst, gain=1.414)
 
-    def forward(self, h, idx):
+    def forward(self, h):
         # 维度可能存在问题 ?
         # idx是否有用 ?
 
-        n = h.size()[0]
+        n = h.size()[1]
 
-        # print(h.size())               [22,48]
-        # print(self.w.size())          [4,48,48]
-        # print(self.a_src.size())      [4,48,1]
-        # print(self.a_dst.size())      [4,48,1]
+        # print(h.size())               # [21,22,48]
+        # print(self.w.size())          # [4,1,48,48]
+        # print(self.a_src.size())      # [4,1,48,1]
+        # print(self.a_dst.size())      # [4,1,48,1]
+        # os._exit(0)
 
         h_prime = torch.matmul(h, self.w)
         attn_src = torch.matmul(h_prime, self.a_src)
         attn_dst = torch.matmul(h_prime, self.a_dst)
-        attn = attn_src.expand(-1, -1, n) + attn_dst.expand(-1, -1, n).permute(0, 2, 1)     # 作用 ?
+        attn = attn_src.expand(-1, -1, -1, n) + attn_dst.expand(-1, -1, -1, n).permute(0, 1, 3, 2)     # 作用 ?
 
         # print("\n")
-        # print(attn_src.size())    [4,22,1]
-        # print(attn_dst.size())    [4,22,1]
-        # print(attn.size())        [4,22,22]
+        # print(attn_src.size())    # [4,21,22,1]
+        # print(attn_dst.size())    # [4,21,22,1]
+        # print(attn.size())        # [4,21,22,22]
+        # os._exit(0)
         # print("\n")
 
         attn = self.leaky_relu(attn)
@@ -194,44 +204,57 @@ class InteractionGate(nn.Module):
             distance_embedding_dim * 2 + action_decoder_hidden_dim * 2, action_decoder_hidden_dim
         )
         self.gateStep2 = nn.Sigmoid()
+        self.flag = 0
 
     def cal_dist(self, goal, action):
+        self.flag += 1
+
         n = goal.size()[0]
-        distance_other = torch.zeros([n, n]).cuda()
-        distance_self = torch.zeros([n, n])
-        for i in range(n):
-            for j in range(i, n):
-                if i == j:
-                    distance_other[i, j] = torch.norm(action[i] - goal[i])
-                    distance_self[i] = distance_other[i, j]
-                else:
-                    a1, a2, g1, g2 = action[i], action[j], goal[i], goal[j]
-                    dn = (a1[0] - a1[0]) * (g1[1] - g2[1]) - (a1[1] - a2[1]) * (g1[0] - g2[0])
-                    n1 = (a1[0] * a2[1] - a1[1] * a2[0]) * (g1[0] - g2[0]) - (a1[0] - a2[0]) * (
-                                g1[0] * g2[1] - g1[0] * g2[0])
-                    n2 = (a1[0] * a2[1] - a1[1] * a2[0]) * (g1[1] - g2[1]) - (a1[1] - a2[0]) * (
-                                g1[0] * g2[1] - g1[0] * g2[0])
+        one = torch.ones(n, n, 2).cuda()
 
-                    d1 = torch.norm(a1 - g1)
-                    d2 = torch.norm(a2 - g2)
-                    if not dn == 0:
-                        p1 = n1 / dn
-                        p2 = n2 / dn
-                        p = torch.tensor([p1, p2]).cuda()
-                        if (a1[0] - p1) * (p1 - g1[0]) > 0:
-                            d1 = torch.norm(a1 - p)
-                            d2 = torch.norm(a2 - p)
+        goal1 = goal.repeat(n, 1).view(n, n, -1)
+        action1 = action.repeat(n, 1).view(n, n, -1)
+        goal2 = goal1.transpose(1, 0)
+        action2 = action1.transpose(1, 0)
 
-                    distance_other[i, j] = d1
-                    distance_other[j, i] = d2
+        distance_self = torch.norm(action2 - goal2, dim=2)
+
+        outer_product_1 = torch.det(torch.cat((action1-goal1, action1-action2), dim=2).view(n, n, 2, 2))
+        outer_product_2 = torch.det(torch.cat((action1-goal1, action1-goal2), dim=2).view(n, n, 2, 2))
+        m = outer_product_1 * outer_product_2 >= 0
+        mask = (m & m.t()).int()
+        distance_other = mask * torch.norm(action1 - goal2, dim=2)     # 不用算交叉点的
+
+        projection1 = (torch.sum((action2-goal2)*(action2-action1), dim=2) /
+                       torch.norm(action2-goal2, dim=2) ** 2).unsqueeze(2).repeat([1, 1, 2])
+
+        foot_point_1 = goal2 * projection1 + action2 * (one - projection1)
+        projection2 = (torch.sum((action2-goal2)*(action2-goal1), dim=2) /
+                       torch.norm(action2-goal2, dim=2) ** 2).unsqueeze(2).repeat([1, 1, 2])
+        foot_point_2 = goal2 * projection2 + action2 * (one - projection2)
+        d1 = torch.norm(action1 - foot_point_1, dim=2).unsqueeze(2).repeat([1, 1, 2])
+        d2 = torch.norm(goal1 - foot_point_2, dim=2).unsqueeze(2).repeat([1, 1, 2])
+
+        d = d1 + d2
+        D1 = torch.zeros([n, n, 2]).cuda()
+        D2 = torch.zeros([n, n, 2]).cuda()
+        D1[d != 0] = d1[d != 0] / d[d != 0]
+        D2[d != 0] = d2[d != 0] / d[d != 0]
+        cross = D1 * foot_point_2 + D2 * foot_point_1
+
+        # cross = d1/(d1+d2) * foot_point_2 + d2/(d1+d2) * foot_point_1
+        # cross[cross != cross] = 0   # 强行将nan置0,恐有问题 ?
+
+        distance_other += (torch.ones(n, n).cuda() - mask) * torch.norm(cross - action1, dim=2)
+
         return distance_self, distance_other
 
-    def forward(self, action_hidden_state, goal_hidden_state, goal, action, ):
+    def forward(self, action_hidden_state, goal_hidden_state, goal, action,):   # 张量化可能存在问题 ?
         num = goal.size()[0]
         distance_self, distance_other = self.cal_dist(goal, action)      # [21,21]
         distance_other_embedding = self.distEmbedding(distance_other.contiguous().view(-1, 1))
         distance_other_embedding = distance_other_embedding.view(num, num, self.distance_embedding_dim)
-        distance_self_embedding = self.distEmbedding(distance_self.contiguous().view(-1 ,1))
+        distance_self_embedding = self.distEmbedding(distance_self.contiguous().view(-1, 1))
         distance_self_embedding = distance_self_embedding.view(num, num, self.distance_embedding_dim)
 
         temp_action = action_hidden_state.repeat(num, 1).view(num, num, -1)
@@ -245,7 +268,7 @@ class InteractionGate(nn.Module):
         goal_action = temp_goal * mask_goal + temp_action * mask_action
 
         gate = self.gateStep1(torch.cat(
-            [temp_action, goal_action, distance_self_embedding, distance_other_embedding], dim=0
+            [temp_action, goal_action, distance_self_embedding, distance_other_embedding], dim=2
         ))
         gate = self.gateStep2(gate)     # [21,21,48]
         output = goal_action * gate
@@ -279,7 +302,8 @@ class GAT(nn.Module):
         )   # [21,21,48]
 
         gate_layer_input = torch.cat([action_hidden_state.unsqueeze(1), gated_hidden_state], dim=1)
-        output = self.gatLayer(gate_layer_input)    # to be continued ...
+        gate_layer_output = self.gatLayer(gate_layer_input)    # [21,22,48]
+        output = gate_layer_output[:, 0, :]
 
         return output
 
@@ -343,10 +367,14 @@ class Decoder(nn.Module):
             self.distance_embedding_dim, self.action_decoder_hidden_dim, n_units, n_heads, dropout, alpha
         )
 
+        self.flag = 0
+
     def forward(
             self, goal_input_hidden_state, action_input_hidden_state,
             action_real, goal_real, teacher_forcing_ratio, seq_start_end,
     ):
+        self.flag += 1
+
         goal_decoder_hidden_state = goal_input_hidden_state
         goal_decoder_cell_state = torch.zeros_like(goal_decoder_hidden_state).cuda()
         action_decoder_hidden_state = action_input_hidden_state
@@ -464,6 +492,7 @@ class TrajectoryPrediction(nn.Module):
             distance_embedding_dim=distance_embedding_dim,
             n_units=n_units, n_heads=n_heads, dropout=dropout, alpha=alpha,
         )
+        self.flag = 0
 
     def add_noise(self, _input, seq_start_end):
         noise_shape = (seq_start_end.size(0),) + self.noise_dim
@@ -481,6 +510,7 @@ class TrajectoryPrediction(nn.Module):
     def forward(
             self, input_action, input_goal, seq_start_end, teacher_forcing_ratio=0.5,
     ):
+        self.flag += 1
         goal_encoder_hidden_state = self.goalEncoder(input_action)
         action_encoder_hidden_state = self.actionEncoder(input_action)
 
@@ -488,10 +518,16 @@ class TrajectoryPrediction(nn.Module):
         goal_hidden_state_noise = self.add_noise(goal_encoder_hidden_state, seq_start_end)
         action_hidden_state_noise = self.add_noise(action_encoder_hidden_state, seq_start_end)
 
+        # if self.flag == 2:
+        #     print(goal_encoder_hidden_state)
+        #     print(goal_hidden_state_noise)
+        #     os._exit(0)
+
         pred_goal, pred_action = self.Decoder(
             goal_hidden_state_noise, action_hidden_state_noise,
             input_action, input_goal, teacher_forcing_ratio, seq_start_end,
         )
 
         return pred_goal, pred_action
+
 

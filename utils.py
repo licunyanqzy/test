@@ -39,7 +39,7 @@ def get_dset_path(dset_name, dset_type):
 
 def average_displacement_error(pred_traj, pred_traj_gt, consider_ped=None, mode="sum"):
     seq_len, _, _ = pred_traj.size()
-    loss = pred_traj_gt.permute(1, 0, 2) - pred_traj.premute(1, 0, 2)
+    loss = pred_traj_gt.permute(1, 0, 2) - pred_traj.permute(1, 0, 2)
     loss = loss ** 2
 
     if consider_ped is not None:

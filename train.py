@@ -19,7 +19,7 @@ parser = argparse.ArgumentParser()
 parser.add_argument("--log_dir", default="./", help="Directory containing logging file")
 parser.add_argument("--dataset_name", default="zara2", type=str)
 parser.add_argument("--delim", default="\t")
-parser.add_argument("--loader_num_workers", default=0, type=int)    # 4 -> 8 or 16 !
+parser.add_argument("--loader_num_workers", default=4, type=int)    # 4 -> 8 or 16 !
 parser.add_argument("--skip", default=1, type=int)
 parser.add_argument("--batch_size", default=64, type=int)       # 64 -> 128 ! ?
 parser.add_argument("--seed", default=72, type=int)
@@ -122,15 +122,15 @@ def train(args, model, sigma, train_loader, optimizer, epoch, writer):
     writer.add_scalar("train_loss", losses.avg, epoch)
 
 
-def validate(args, model, weightLoss, val_loader, epoch, writer):
+def validate(args, model, val_loader, epoch, writer):
     ADE = utils.AverageMeter("ADE", ":.6f")
     FDE = utils.AverageMeter("FDE", ":.6f")
     progress = utils.ProgressMeter(len(val_loader), [ADE, FDE], prefix="Test: ")
 
     model.eval()
-    weightLoss.eval()
-    with torch.no_grad:
+    with torch.no_grad():
         for i, batch in enumerate(val_loader):
+            batch = [tensor.cuda() for tensor in batch]
             (
                 obs_traj,          # obs_traj, [8,235,2]
                 pred_traj_gt,      # pred_traj, [12,235,2]
@@ -142,11 +142,12 @@ def validate(args, model, weightLoss, val_loader, epoch, writer):
             ) = batch
 
             loss_mask = loss_mask[:, args.obs_len:]
-            obs_goal = utils.cal_goal(obs_traj_rel)
-            pred_goal_gt = utils.cal_goal(pred_traj_gt_rel)
+            traj_obs_pred = torch.cat((obs_traj_rel, pred_traj_gt_rel), dim=0)
+            goal_obs_traj = utils.cal_goal(traj_obs_pred)
+            input_goal = goal_obs_traj[args.obs_len:]
 
             pred_goal_fake, pred_action_fake = model(   # 默认 teacher_forcing_ratio = 0.5, training_step = 2, 前者是否需要调整 ?
-                obs_traj_rel, seq_start_end,  # 暂时输入/输出 traj ?
+                obs_traj_rel, input_goal, seq_start_end,            # 暂时输入/输出 traj ?
             )
 
             # 输入/输出 traj

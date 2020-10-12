@@ -153,3 +153,72 @@ class GAT(nn.Module):
 
         outputs = torch.stack(outputs)
         return outputs
+
+
+
+    def cal_dist(self, goal, action):
+        n = goal.size()[0]
+        distance_other = torch.zeros([n, n], requires_grad=False).cuda()    # 是否可以 ?
+        distance_self = torch.zeros([n, n], requires_grad=False).cuda()     # 是否可以 ?
+        for i in range(n):
+            for j in range(i, n):
+                if i == j:
+                    distance_other[i, j] = torch.norm(action[i] - goal[i])
+                    distance_self[i] = distance_other[i, j]
+                else:
+                    a1, a2, g1, g2 = action[i], action[j], goal[i], goal[j]
+
+                    dn = (a1[0] - a1[0]) * (g1[1] - g2[1]) - (a1[1] - a2[1]) * (g1[0] - g2[0])
+                    n1 = (a1[0] * a2[1] - a1[1] * a2[0]) * (g1[0] - g2[0]) - (a1[0] - a2[0]) * (
+                                g1[0] * g2[1] - g1[0] * g2[0])
+                    n2 = (a1[0] * a2[1] - a1[1] * a2[0]) * (g1[1] - g2[1]) - (a1[1] - a2[0]) * (
+                                g1[0] * g2[1] - g1[0] * g2[0])
+
+                    d1 = torch.norm(a1 - g1)
+                    d2 = torch.norm(a2 - g2)
+                    if not dn == 0:
+                        p1 = n1 / dn
+                        p2 = n2 / dn
+                        p = torch.tensor([p1, p2]).cuda()
+                        if (a1[0] - p1) * (p1 - g1[0]) > 0:
+                            d1 = torch.norm(a1 - p)
+                            d2 = torch.norm(a2 - p)
+
+                    distance_other[i, j] = d1
+                    distance_other[j, i] = d2
+        return distance_self, distance_other
+
+
+def cal_dist(self, goal, action):
+    n = goal.size()[0]
+    distance_other = torch.zeros([n, n], requires_grad=False).cuda()    # 是否可以 ?
+    distance_self = torch.zeros([n, n], requires_grad=False).cuda()     # 是否可以 ?
+    for i in range(n):
+        for j in range(i, n):
+            if i == j:
+                distance_other[i, j] = torch.norm(action[i] - goal[i])
+                distance_self[i] = distance_other[i, j]
+            else:
+                a1, a2, g1, g2 = action[i], action[j], goal[i], goal[j]
+
+                dn = (a1[0] - a1[0]) * (g1[1] - g2[1]) - (a1[1] - a2[1]) * (g1[0] - g2[0])
+                n1 = (a1[0] * a2[1] - a1[1] * a2[0]) * (g1[0] - g2[0]) - (a1[0] - a2[0]) * (
+                            g1[0] * g2[1] - g1[0] * g2[0])
+                n2 = (a1[0] * a2[1] - a1[1] * a2[0]) * (g1[1] - g2[1]) - (a1[1] - a2[0]) * (
+                            g1[0] * g2[1] - g1[0] * g2[0])
+
+                d1 = torch.norm(a1 - g1)
+                d2 = torch.norm(a2 - g2)
+                if not dn == 0:
+                    p1 = n1 / dn
+                    p2 = n2 / dn
+                    p = torch.tensor([p1, p2]).cuda()
+                    if (a1[0] - p1) * (p1 - g1[0]) > 0:
+                        d1 = torch.norm(a1 - p)
+                        d2 = torch.norm(a2 - p)
+
+                distance_other[i, j] = d1
+                distance_other[j, i] = d2
+    return distance_self, distance_other
+
+
