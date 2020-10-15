@@ -134,7 +134,7 @@ class TrajectoryDataset(Dataset):
                     frame_data[idx : idx + self.seq_len], axis=0
                 )
                 peds_in_curr_seq = np.unique(curr_seq_data[:, 1])
-                curr_seq_rel = np.zeros((len(peds_in_curr_seq), 2, self.seq_len))
+                curr_seq_rel = np.zeros((len(peds_in_curr_seq), 2, self.seq_len))   # [46,2,20]
                 curr_seq = np.zeros((len(peds_in_curr_seq), 2, self.seq_len))
                 curr_loss_mask = np.zeros((len(peds_in_curr_seq), self.seq_len))
                 num_peds_considered = 0
@@ -170,7 +170,7 @@ class TrajectoryDataset(Dataset):
 
         self.num_seq = len(seq_list)
         seq_list = np.concatenate(seq_list, axis=0)
-        seq_list_rel = np.concatenate(seq_list_rel, axis=0)
+        seq_list_rel = np.concatenate(seq_list_rel, axis=0)     # [25507,2,20]
         loss_mask_list = np.concatenate(loss_mask_list, axis=0)
         non_linear_ped = np.asarray(non_linear_ped)
 

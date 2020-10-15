@@ -134,7 +134,7 @@ def int_tuple(s):
     return tuple(int(i) for i in s.split(","))
 
 
-def relative_to_abs(rel_traj, start_pos):   # 作用 ?
+def relative_to_abs(rel_traj, start_pos):
     """
     Inputs:
     - rel_traj: pytorch tensor of shape (seq_len, batch, 2)
@@ -153,7 +153,7 @@ def relative_to_abs(rel_traj, start_pos):   # 作用 ?
 def cal_goal(traj):                       # Tensor [20, 1413, 2]
     seq_len, num, c = traj.size()
 
-    action = torch.zeros(seq_len-1, num, c)
+    action = torch.zeros(seq_len-1, num, c).cuda()
     for i in range(seq_len - 1):
         action[i, :, :] = traj[i + 1, :, :] - traj[i, :, :]
 
@@ -161,21 +161,20 @@ def cal_goal(traj):                       # Tensor [20, 1413, 2]
 
     for j in range(num):
         index = 0
-
         for i in range(seq_len - 2):
             velocity1 = torch.norm(action[i, j, :])
             velocity2 = torch.norm(action[i+1, j, :])
 
-            if velocity1 < 0.1 or velocity2 < 0.1:     # 速度小于0.1, 参数需要是否调整 ?
-                index = i
-                goal[index:i, j, :] = traj[i + 1, j, :]
-                continue
-
             turn = torch.dot(action[i, j, :], action[i+1, j, :]) / (velocity1 * velocity2)
 
-            if turn < 0.3:   # 转弯的余弦值小于0.3, 参数需要是否调整 ?
+            if turn < 0.3:  # 转弯的余弦值小于0.3, 参数需要是否调整 ?
+                goal[index:i+2, j, :] = traj[i+1, j, :]
+                index = i + 1
+                continue
+
+            if velocity1 < 0.02:     # 速度小于0.1, 参数需要是否调整 ?
+                goal[index:i+1, j, :] = traj[i+1, j, :]
                 index = i
-                goal[index:i, j, :] = traj[i+1, j, :]
 
         goal[index:seq_len, j, :] = traj[-1, j, :]
 

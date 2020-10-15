@@ -371,7 +371,7 @@ class Decoder(nn.Module):
 
     def forward(
             self, goal_input_hidden_state, action_input_hidden_state,
-            action_real, goal_real, teacher_forcing_ratio, seq_start_end,
+            action_real, teacher_forcing_ratio, seq_start_end,
     ):
         self.flag += 1
 
@@ -383,7 +383,6 @@ class Decoder(nn.Module):
         pred_goal = []
         pred_action = []
         action_output = action_real[self.obs_len - 1]
-        goal_output = goal_real[self.obs_len - 1]
 
         batch = action_real.shape[1]
         action_real_embedding = self.actionEmbedding(action_real.contiguous().view(-1, 2))    # [28260, 16]
@@ -508,7 +507,7 @@ class TrajectoryPrediction(nn.Module):
         return decoder_h
 
     def forward(
-            self, input_action, input_goal, seq_start_end, teacher_forcing_ratio=0.5,
+            self, input_action, seq_start_end, teacher_forcing_ratio=0.5,
     ):
         self.flag += 1
         goal_encoder_hidden_state = self.goalEncoder(input_action)
@@ -525,7 +524,7 @@ class TrajectoryPrediction(nn.Module):
 
         pred_goal, pred_action = self.Decoder(
             goal_hidden_state_noise, action_hidden_state_noise,
-            input_action, input_goal, teacher_forcing_ratio, seq_start_end,
+            input_action, teacher_forcing_ratio, seq_start_end,
         )
 
         return pred_goal, pred_action

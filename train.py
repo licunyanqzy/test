@@ -44,13 +44,14 @@ parser.add_argument("--noise_type", default="gaussian", type=str)
 parser.add_argument("--lr", default=1e-3, type=float)
 parser.add_argument("--start_epoch", default=0, type=int)
 parser.add_argument("--num_epoch", default=400, type=int)
+parser.add_argument("--best_k", default=20, type=int)
 
-parser.add_argument("--gpu_num", default="0", type=str)
+parser.add_argument("--gpu_num", default="1", type=str)
 parser.add_argument("--use_gpu", default=True, type=bool)
 parser.add_argument("--print_every", default=10, type=int)
 
 parser.add_argument("--resume", default="", type=str)
-
+# /home/lcy/PycharmProjects/test/checkpoint/checkpoint68.pth.tar
 
 bestADE = 100
 
@@ -79,29 +80,28 @@ def train(args, model, sigma, train_loader, optimizer, epoch, writer):
         l2_loss_rel = []
         loss_mask = loss_mask[:, args.obs_len:]
 
-        input_traj = torch.cat((obs_traj_rel, pred_traj_gt_rel), dim=0)     # [20,1413,2]
-        input_goal = utils.cal_goal(input_traj)     # [20,1413,2]
-        pred_goal_gt_rel = input_goal[args.obs_len:]     # [12,1413,2]
+        traj_rel_gt = torch.cat((obs_traj_rel, pred_traj_gt_rel), dim=0)
+        goal_gt = utils.cal_goal(torch.cat((obs_traj, pred_traj_gt), dim=0))
+        pred_goal_gt = goal_gt[args.obs_len:]
 
-        pred_goal_fake, pred_action_fake = model(       # [12,1413,2] [12,1413,2]
-            input_traj, input_goal, seq_start_end, 1    # teacher_forcing_ratio 的取值 ?
+        pred_goal_fake, pred_traj_fake_rel = model(
+            traj_rel_gt, seq_start_end, 1    # teacher_forcing_ratio 的取值 ?
         )
 
-        # 输入/输出 traj
-        pred_traj_fake = pred_action_fake
-
-        l2_traj = utils.l2_loss(pred_traj_fake, pred_traj_gt_rel, loss_mask, mode="raw").unsqueeze(1)
-        l2_goal = utils.l2_loss(pred_goal_fake, pred_goal_gt_rel, loss_mask, mode="raw").unsqueeze(1)
+        l2_traj = utils.l2_loss(pred_traj_fake_rel, pred_traj_gt_rel, loss_mask, mode="raw").unsqueeze(1)
+        l2_goal = utils.l2_loss(pred_goal_fake, pred_goal_gt, loss_mask, mode="raw").unsqueeze(1)
         l2_traj_sum = torch.zeros(1).to(pred_traj_gt)
         l2_goal_sum = torch.zeros(1).to(pred_traj_gt)
+
         for start, end in seq_start_end.data:
             _l2_traj = torch.narrow(l2_traj, 0, start, end-start)
-            _l2_goal = torch.narrow(l2_goal, 0, start, end-start)
             _l2_traj = torch.sum(_l2_traj, dim=0)
-            _l2_goal = torch.sum(_l2_goal, dim=0)
-            _l2_traj = torch.min(_l2_traj) / (pred_traj_fake.shape[0] * (end-start))
-            _l2_goal = torch.min(_l2_goal) / (pred_goal_fake.shape[0] * (end-start))
+            _l2_traj = torch.min(_l2_traj) / (pred_traj_fake_rel.shape[0] * (end-start))
             l2_traj_sum += _l2_traj
+
+            _l2_goal = torch.narrow(l2_goal, 0, start, end-start)
+            _l2_goal = torch.sum(_l2_goal, dim=0)
+            _l2_goal = torch.min(_l2_goal) / (pred_goal_fake.shape[0] * (end-start))
             l2_goal_sum += _l2_goal
 
         l2_weight = 0.5 / (sigma[0] ** 2) * l2_traj_sum + 0.5 / (sigma[1] ** 2) * l2_goal_sum \
@@ -109,7 +109,7 @@ def train(args, model, sigma, train_loader, optimizer, epoch, writer):
 
         print(l2_goal_sum)
         print(l2_traj_sum)
-        print(l2_weight)
+        print(sigma)
 
         loss += l2_weight
         losses.update(loss.item(), obs_traj.shape[1])
@@ -142,23 +142,16 @@ def validate(args, model, val_loader, epoch, writer):
             ) = batch
 
             loss_mask = loss_mask[:, args.obs_len:]
-            traj_obs_pred = torch.cat((obs_traj_rel, pred_traj_gt_rel), dim=0)
-            goal_obs_traj = utils.cal_goal(traj_obs_pred)
-            input_goal = goal_obs_traj[args.obs_len:]
+            goal_obs_traj = utils.cal_goal(torch.cat((obs_traj, pred_traj_gt), dim=0))
+            pred_goal_gt = goal_obs_traj[args.obs_len:]
 
-            pred_goal_fake, pred_action_fake = model(   # 默认 teacher_forcing_ratio = 0.5, training_step = 2, 前者是否需要调整 ?
-                obs_traj_rel, input_goal, seq_start_end,            # 暂时输入/输出 traj ?
+            pred_goal_fake, pred_traj_fake_rel = model(   # 默认 teacher_forcing_ratio = 0.5, training_step = 2, 前者是否需要调整 ?
+                obs_traj_rel, seq_start_end,            # 暂时输入/输出 traj ?
             )
 
-            # 输入/输出 traj
-            pred_traj_fake = pred_action_fake
-            # pred_traj_fake = utils.action2traj(pred_action_fake)
+            # pred_traj_fake_abs = utils.relative_to_abs(pred_traj_fake_rel, obs_traj[-1])
 
-            # 是否还需要这两步的处理 ?
-            pred_traj_fake_predpart = pred_traj_fake[-args.pred_len:]
-            pred_traj_fake_abs = utils.relative_to_abs(pred_traj_fake_predpart, obs_traj[-1])
-
-            ADE_, FDE_ = utils.cal_ADE_FDE(pred_traj_gt, pred_traj_fake_abs)
+            ADE_, FDE_ = utils.cal_ADE_FDE(pred_traj_gt_rel, pred_traj_fake_rel)
             ADE_ = ADE_ / (obs_traj.shape[1] * args.pred_len)
             FDE_ = FDE_ / (obs_traj.shape[1])
             ADE.update(ADE_, obs_traj.shape[1])
@@ -216,9 +209,8 @@ def main(args):
         noise_type=args.noise_type,
     )
     model.cuda()
-    sigma1 = torch.ones((1,), requires_grad=True)
-    sigma2 = torch.ones((1,), requires_grad=True)
-    params = ([p for p in model.parameters()] + [sigma1] + [sigma2])
+    sigma = torch.ones((2), requires_grad=True)
+    params = ([p for p in model.parameters()] + [sigma])
     optimizer = optim.Adam(params, lr=args.lr)     # 是否需要为每个模块单独设置参数 ?
 
     if args.resume:     # start from checkpoint
@@ -238,7 +230,7 @@ def main(args):
     global bestADE
 
     for epoch in range(args.start_epoch, args.num_epoch):
-        sigma = [sigma1.cuda(), sigma2.cuda()]
+        sigma = sigma.cuda()
         train(args, model, sigma, train_loader, optimizer, epoch, writer)
 
         ADE = validate(args, model, val_loader, epoch, writer)

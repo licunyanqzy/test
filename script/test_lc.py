@@ -9,5 +9,8 @@ import timeit
 import operator
 
 
-
+a = np.arange(1, 11).reshape([2, 5])
+b = np.cumsum(a)
+print(a)
+print(b)
 
