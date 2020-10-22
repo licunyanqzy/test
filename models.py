@@ -124,11 +124,10 @@ class GraphAttentionLayer(nn.Module):
         self.f_out = f_out
 
         self.w = nn.Parameter(torch.Tensor(n_head, 1, f_in, f_out))
-        self.a_src = nn.Parameter(torch.Tensor(n_head, 1, f_out, 1))
-        self.a_dst = nn.Parameter(torch.Tensor(n_head, 1, f_out, 1))
-
+        self.a = nn.Parameter(torch.Tensor(1, 1, f_out*2, 1))
         self.leaky_relu = nn.LeakyReLU(negative_slope=0.2)
-        self.softmax = nn.Softmax(dim=-1)
+        self.softmax = nn.Softmax(dim=-2)
+
         self.dropout = nn.Dropout(attn_dropout)
         if bias:
             self.bias = nn.Parameter(torch.Tensor(f_out))
@@ -137,48 +136,21 @@ class GraphAttentionLayer(nn.Module):
             self.register_parameter("bias", None)
 
         nn.init.xavier_uniform_(self.w, gain=1.414)
-        nn.init.xavier_uniform_(self.a_src, gain=1.414)
-        nn.init.xavier_uniform_(self.a_dst, gain=1.414)
+        nn.init.xavier_uniform_(self.a, gain=1.414)
 
-    def forward(self, h):
-        # 维度可能存在问题 ?
-        # idx是否有用 ?
-
-        n = h.size()[1]
-
-        # print(h.size())               # [21,22,48]
-        # print(self.w.size())          # [4,1,48,48]
-        # print(self.a_src.size())      # [4,1,48,1]
-        # print(self.a_dst.size())      # [4,1,48,1]
-        # os._exit(0)
-
-        h_prime = torch.matmul(h, self.w)
-        attn_src = torch.matmul(h_prime, self.a_src)
-        attn_dst = torch.matmul(h_prime, self.a_dst)
-        attn = attn_src.expand(-1, -1, -1, n) + attn_dst.expand(-1, -1, -1, n).permute(0, 1, 3, 2)     # 作用 ?
-
-        # print("\n")
-        # print(attn_src.size())    # [4,21,22,1]
-        # print(attn_dst.size())    # [4,21,22,1]
-        # print(attn.size())        # [4,21,22,22]
-        # os._exit(0)
-        # print("\n")
-
-        attn = self.leaky_relu(attn)
-        attn = self.softmax(attn)
-        attn = self.dropout(attn)
-        output = torch.matmul(attn, h_prime)
-        output_mean = torch.mean(output, dim=0)
-
-        # print(attn.size())            [4,22,22]
-        # print(output.size())          [4,22,48]
-        # print(output_mean.size())     [22,48]
-        # os._exit(0)
+    def forward(self, h_self, h_other):   # [21,22,48]
+        h_self_prime = torch.matmul(h_self, self.w)
+        h_other_prime = torch.matmul(h_other, self.w)
+        h_prime_1 = torch.cat([h_self_prime, h_other_prime], dim=-1)    # [4,21,22,96]
+        h_prime_2 = torch.matmul(h_prime_1, self.a)     # [4,21,22,1]
+        alpha = self.softmax(self.leaky_relu(h_prime_2))
+        h_attn = alpha.repeat(1, 1, 1, self.f_out) * h_other   # [4,21,22,48]
+        output = torch.mean(torch.sum(h_attn, dim=-2), dim=0)    # [21,48]
 
         if self.bias is not None:
-            return output_mean + self.bias
+            return output + self.bias
         else:
-            return output_mean
+            return output
 
     def __repr__(self):
         return (
@@ -252,19 +224,19 @@ class InteractionGate(nn.Module):
     def forward(self, action_hidden_state, goal_hidden_state, goal, action,):   # 张量化可能存在问题 ?
         num = goal.size()[0]
         distance_self, distance_other = self.cal_dist(goal, action)      # [21,21]
+
         distance_other_embedding = self.distEmbedding(distance_other.contiguous().view(-1, 1))
         distance_other_embedding = distance_other_embedding.view(num, num, self.distance_embedding_dim)
         distance_self_embedding = self.distEmbedding(distance_self.contiguous().view(-1, 1))
         distance_self_embedding = distance_self_embedding.view(num, num, self.distance_embedding_dim)
 
-        temp_action = action_hidden_state.repeat(num, 1).view(num, num, -1)
+        temp_action = action_hidden_state.repeat(num, 1).view(num, num, -1).transpose(1, 0)
         temp_goal = goal_hidden_state.repeat(num, 1).view(num, num, -1)     # [21,21,48]
-        mask_goal = torch.ones([num, num]).cuda()
-        mask_goal = torch.triu(mask_goal, 0) - torch.triu(mask_goal, 1)    # [21,21]
-        mask_goal = mask_goal.unsqueeze(2).expand(num, num, self.action_decoder_hidden_dim)
-        mask_action = torch.ones([num, num]).cuda()
-        mask_action = torch.triu(mask_action, 1) + torch.tril(mask_action, -1)
-        mask_action = mask_action.unsqueeze(2).expand(num, num, self.action_decoder_hidden_dim)
+
+        mask_goal = torch.eye(num).cuda()
+        mask_goal = mask_goal.unsqueeze(2).repeat([1, 1, self.action_decoder_hidden_dim])
+        mask_action = torch.ones([num, num, self.action_decoder_hidden_dim]).cuda() - mask_goal
+
         goal_action = temp_goal * mask_goal + temp_action * mask_action
 
         gate = self.gateStep1(torch.cat(
@@ -297,13 +269,14 @@ class GAT(nn.Module):
         # 只能进行一层GAT, 如何实现两层 ? to be continued ...
         n = action_hidden_state.size()[0]
 
-        gated_hidden_state = self.interactionGate(
+        gated_h = self.interactionGate(
             action_hidden_state, goal_hidden_state, goal, action
         )   # [21,21,48]
 
-        gate_layer_input = torch.cat([action_hidden_state.unsqueeze(1), gated_hidden_state], dim=1)
-        gate_layer_output = self.gatLayer(gate_layer_input)    # [21,22,48]
-        output = gate_layer_output[:, 0, :]
+        h_self = action_hidden_state.repeat(n+1, 1).view(n+1, n, -1).transpose(1, 0)
+        h_other = torch.cat([action_hidden_state.unsqueeze(1), gated_h], dim=1)
+
+        output = self.gatLayer(h_self, h_other)    # [21,22,48]
 
         return output
 
@@ -371,7 +344,7 @@ class Decoder(nn.Module):
 
     def forward(
             self, goal_input_hidden_state, action_input_hidden_state,
-            action_real, teacher_forcing_ratio, seq_start_end,
+            traj_real, action_real, teacher_forcing_ratio, seq_start_end, training_step
     ):
         self.flag += 1
 
@@ -380,24 +353,27 @@ class Decoder(nn.Module):
         action_decoder_hidden_state = action_input_hidden_state
         action_decoder_cell_state = torch.zeros_like(action_decoder_hidden_state).cuda()
 
-        pred_goal = []
-        pred_action = []
+        pred_seq = []
         action_output = action_real[self.obs_len - 1]
+        traj_output = traj_real[self.obs_len - 1]
 
         batch = action_real.shape[1]
         action_real_embedding = self.actionEmbedding(action_real.contiguous().view(-1, 2))    # [28260, 16]
         action_real_embedding = action_real_embedding.view(-1, batch, self.action_decoder_input_dim)  # [20,1413,16]
+        traj_real_embedding = self.goalEmbedding(traj_real.contiguous().view(-1, 2))
+        traj_real_embedding = traj_real_embedding.view(-1, batch, self.goal_decoder_input_dim)
 
         if self.training:
-            for i, input_data in enumerate(
-              action_real_embedding[-self.pred_len:].chunk(
-                  action_real_embedding[-self.pred_len:].size(0), dim=0
-              )
-            ):
+            # for i, input_data in enumerate(
+            #   action_real_embedding[-self.pred_len:].chunk(
+            #       action_real_embedding[-self.pred_len:].size(0), dim=0
+            #   )
+            # ):
+            for i in range(self.pred_len):
                 teacher_forcing = random.random() < teacher_forcing_ratio
                 if teacher_forcing:
-                    goal_input_data = input_data
-                    action_input_data = input_data
+                    goal_input_data = traj_real_embedding[-self.pred_len + i]
+                    action_input_data = action_real_embedding[-self.pred_len + i]
                 else:
                     goal_input_data = self.goalEmbedding(action_output)
                     action_input_data = self.actionEmbedding(action_output)
@@ -406,7 +382,10 @@ class Decoder(nn.Module):
                     goal_input_data.squeeze(0), (goal_decoder_hidden_state, goal_decoder_cell_state)
                 )
                 goal_output = self.hidden2goal(goal_decoder_hidden_state)
-                pred_goal += [goal_output]
+
+                if training_step == 1:
+                    pred_seq += [goal_output]
+                    continue
 
                 # 两种思路: 现为先LSTM后interaction, 是否需要调整为先interaction后LSTM ?
 
@@ -416,37 +395,41 @@ class Decoder(nn.Module):
 
                 action_decoder_hidden_state = self.attention(
                     action_decoder_hidden_state, goal_decoder_hidden_state,
-                    goal_output, action_output, seq_start_end
+                    goal_output, traj_output, seq_start_end
                 )
-
                 action_output = self.hidden2action(action_decoder_hidden_state)
-                pred_action += [action_output]
+                traj_output = traj_output + action_output
+
+                if training_step == 2:
+                    pred_seq += [action_output]
         else:
             for i in range(self.pred_len):
-                input_data = self.goalEmbedding(action_output)
+                goal_input_data = self.goalEmbedding(traj_output)
                 goal_decoder_hidden_state, goal_decoder_cell_state = self.goalDecoderLSTM(
-                    input_data.squeeze(0), (goal_decoder_hidden_state, goal_decoder_cell_state)
+                    goal_input_data.squeeze(0), (goal_decoder_hidden_state, goal_decoder_cell_state)
                 )
                 goal_output = self.hidden2goal(goal_decoder_hidden_state)
-                pred_goal += [goal_output]
+                # pred_goal += [goal_output]
 
                 # 两种思路: 现为先LSTM后interaction, 是否需要调整为先interaction后LSTM ?
 
+                action_input_data = self.actionEmbedding(action_output)
                 action_decoder_hidden_state, action_decoder_cell_state = self.actionDecoderLSTM(
-                    input_data.squeeze(0), (action_decoder_hidden_state, action_decoder_cell_state)
+                    action_input_data.squeeze(0), (action_decoder_hidden_state, action_decoder_cell_state)
                 )
 
                 action_decoder_hidden_state = self.attention(
                     action_decoder_hidden_state, goal_decoder_hidden_state,
-                    goal_output, action_output, seq_start_end
+                    goal_output, traj_output, seq_start_end
                 )
-
                 action_output = self.hidden2action(action_decoder_hidden_state)
-                pred_action += [action_output]
+                traj_output = traj_output + action_output
+                pred_seq += [action_output]
 
-        pred_goal_output = torch.stack(pred_goal)
-        pred_action_output = torch.stack(pred_action)
-        return pred_goal_output, pred_action_output
+        # pred_goal_output = torch.stack(pred_goal)
+        # pred_action_output = torch.stack(pred_action)
+        pred_seq_output = torch.stack(pred_seq)
+        return pred_seq_output
 
 
 class TrajectoryPrediction(nn.Module):
@@ -507,26 +490,21 @@ class TrajectoryPrediction(nn.Module):
         return decoder_h
 
     def forward(
-            self, input_action, seq_start_end, teacher_forcing_ratio=0.5,
+            self, input_traj, input_action, seq_start_end, teacher_forcing_ratio=0.5, training_step=2
     ):
         self.flag += 1
-        goal_encoder_hidden_state = self.goalEncoder(input_action)
+        goal_encoder_hidden_state = self.goalEncoder(input_traj)
         action_encoder_hidden_state = self.actionEncoder(input_action)
 
         # add noise 噪声加的是否正确 ?
         goal_hidden_state_noise = self.add_noise(goal_encoder_hidden_state, seq_start_end)
         action_hidden_state_noise = self.add_noise(action_encoder_hidden_state, seq_start_end)
 
-        # if self.flag == 2:
-        #     print(goal_encoder_hidden_state)
-        #     print(goal_hidden_state_noise)
-        #     os._exit(0)
-
-        pred_goal, pred_action = self.Decoder(
+        pred_seq = self.Decoder(
             goal_hidden_state_noise, action_hidden_state_noise,
-            input_action, teacher_forcing_ratio, seq_start_end,
+            input_traj, input_action, teacher_forcing_ratio, seq_start_end, training_step,
         )
 
-        return pred_goal, pred_action
+        return pred_seq
 
 

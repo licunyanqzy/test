@@ -43,7 +43,7 @@ parser.add_argument("--noise_type", default="gaussian", type=str)
 
 parser.add_argument("--lr", default=1e-3, type=float)
 parser.add_argument("--start_epoch", default=0, type=int)
-parser.add_argument("--num_epoch", default=400, type=int)
+parser.add_argument("--num_epoch", default=100, type=int)
 parser.add_argument("--best_k", default=20, type=int)
 
 parser.add_argument("--gpu_num", default="1", type=str)
@@ -56,7 +56,7 @@ parser.add_argument("--resume", default="", type=str)
 bestADE = 100
 
 
-def train(args, model, sigma, train_loader, optimizer, epoch, writer):
+def train(args, model, train_loader, optimizer, epoch, writer, training_step):
     losses = utils.AverageMeter("Loss", ":.6f")
     progress = utils.ProgressMeter(
         len(train_loader), [losses], prefix="Epoch: [{}]".format(epoch)
@@ -80,38 +80,38 @@ def train(args, model, sigma, train_loader, optimizer, epoch, writer):
         l2_loss_rel = []
         loss_mask = loss_mask[:, args.obs_len:]
 
-        traj_rel_gt = torch.cat((obs_traj_rel, pred_traj_gt_rel), dim=0)
+        traj_gt = torch.cat((obs_traj, pred_traj_gt), dim=0)
+        traj_gt_rel = torch.cat((obs_traj_rel, pred_traj_gt_rel), dim=0)
         goal_gt = utils.cal_goal(torch.cat((obs_traj, pred_traj_gt), dim=0))
         pred_goal_gt = goal_gt[args.obs_len:]
 
-        pred_goal_fake, pred_traj_fake_rel = model(
-            traj_rel_gt, seq_start_end, 1    # teacher_forcing_ratio 的取值 ?
+        # 注意 training step 分为两个阶段, teacher forcing ratio 如何根据epoch动态调整 ?
+        # Exponential Decay, Inverse Sigmoid decay, Linear decay
+        if training_step == 1:
+            teacher_forcing_ratio = 1
+        elif training_step == 2:
+            teacher_forcing_ratio = 0
+
+        pred_seq_fake = model(     # teacher_forcing_ratio 的取值 ?
+            traj_gt, traj_gt_rel, seq_start_end, teacher_forcing_ratio=teacher_forcing_ratio, training_step=training_step
         )
 
-        l2_traj = utils.l2_loss(pred_traj_fake_rel, pred_traj_gt_rel, loss_mask, mode="raw").unsqueeze(1)
-        l2_goal = utils.l2_loss(pred_goal_fake, pred_goal_gt, loss_mask, mode="raw").unsqueeze(1)
-        l2_traj_sum = torch.zeros(1).to(pred_traj_gt)
-        l2_goal_sum = torch.zeros(1).to(pred_traj_gt)
+        if training_step == 1:
+            l2_loss = utils.l2_loss(pred_seq_fake, pred_goal_gt, loss_mask, mode="raw").unsqueeze(1)
+        elif training_step == 2:
+            # l2_loss = utils.l2_loss(pred_seq_fake, pred_traj_gt_rel, loss_mask, mode="raw").unsqueeze(1)
+            pred_seq_fake_abs = utils.relative_to_abs(pred_seq_fake, obs_traj[-1])
+            l2_loss = utils.l2_loss(pred_seq_fake_abs, pred_traj_gt, loss_mask, mode="raw").unsqueeze(1)
 
-        for start, end in seq_start_end.data:
-            _l2_traj = torch.narrow(l2_traj, 0, start, end-start)
-            _l2_traj = torch.sum(_l2_traj, dim=0)
-            _l2_traj = torch.min(_l2_traj) / (pred_traj_fake_rel.shape[0] * (end-start))
-            l2_traj_sum += _l2_traj
+        l2_loss_sum = torch.zeros(1).to(pred_traj_gt)
 
-            _l2_goal = torch.narrow(l2_goal, 0, start, end-start)
-            _l2_goal = torch.sum(_l2_goal, dim=0)
-            _l2_goal = torch.min(_l2_goal) / (pred_goal_fake.shape[0] * (end-start))
-            l2_goal_sum += _l2_goal
+        for start, end in seq_start_end.data:       # 似存在问题, 应为sum(a)/sum(b), 而非sum(a/b), 或近似于sum(a/b)/len(a) !
+            _l2_loss = torch.narrow(l2_loss, 0, start, end-start)
+            _l2_loss = torch.sum(_l2_loss, dim=0)
+            _l2_loss = torch.min(_l2_loss) / (pred_seq_fake.shape[0] * (end-start))
+            l2_loss_sum += _l2_loss
 
-        l2_weight = 0.5 / (sigma[0] ** 2) * l2_traj_sum + 0.5 / (sigma[1] ** 2) * l2_goal_sum \
-            + torch.log(sigma[0]) + torch.log(sigma[1])
-
-        print(l2_goal_sum)
-        print(l2_traj_sum)
-        print(sigma)
-
-        loss += l2_weight
+        loss += l2_loss_sum
         losses.update(loss.item(), obs_traj.shape[1])
         loss.backward()
         optimizer.step()
@@ -144,14 +144,13 @@ def validate(args, model, val_loader, epoch, writer):
             loss_mask = loss_mask[:, args.obs_len:]
             goal_obs_traj = utils.cal_goal(torch.cat((obs_traj, pred_traj_gt), dim=0))
             pred_goal_gt = goal_obs_traj[args.obs_len:]
+            traj_gt = torch.cat((obs_traj, pred_traj_gt), dim=0)
 
-            pred_goal_fake, pred_traj_fake_rel = model(   # 默认 teacher_forcing_ratio = 0.5, training_step = 2, 前者是否需要调整 ?
-                obs_traj_rel, seq_start_end,            # 暂时输入/输出 traj ?
-            )
+            pred_traj_fake_rel = model(obs_traj, obs_traj_rel, seq_start_end, training_step=1)
 
-            # pred_traj_fake_abs = utils.relative_to_abs(pred_traj_fake_rel, obs_traj[-1])
+            pred_traj_fake_abs = utils.relative_to_abs(pred_traj_fake_rel, obs_traj[-1])
 
-            ADE_, FDE_ = utils.cal_ADE_FDE(pred_traj_gt_rel, pred_traj_fake_rel)
+            ADE_, FDE_ = utils.cal_ADE_FDE(pred_traj_gt, pred_traj_fake_abs)
             ADE_ = ADE_ / (obs_traj.shape[1] * args.pred_len)
             FDE_ = FDE_ / (obs_traj.shape[1])
             ADE.update(ADE_, obs_traj.shape[1])
@@ -209,8 +208,9 @@ def main(args):
         noise_type=args.noise_type,
     )
     model.cuda()
-    sigma = torch.ones((2), requires_grad=True)
-    params = ([p for p in model.parameters()] + [sigma])
+    # sigma = torch.ones((2), requires_grad=True)
+    # params = ([p for p in model.parameters()] + [sigma])
+    params = ([p for p in model.parameters()])
     optimizer = optim.Adam(params, lr=args.lr)     # 是否需要为每个模块单独设置参数 ?
 
     if args.resume:     # start from checkpoint
@@ -230,23 +230,29 @@ def main(args):
     global bestADE
 
     for epoch in range(args.start_epoch, args.num_epoch):
-        sigma = sigma.cuda()
-        train(args, model, sigma, train_loader, optimizer, epoch, writer)
+        # sigma = sigma.cuda()
 
-        ADE = validate(args, model, val_loader, epoch, writer)
-        is_best = ADE > bestADE
-        bestADE = min(ADE, bestADE)
+        if epoch < 30:
+            training_step = 1
+            train(args, model, train_loader, optimizer, epoch, writer, training_step)
+        else:
+            training_step = 2
+            train(args, model, train_loader, optimizer, epoch, writer, training_step)
 
-        utils.save_checkpoint(  # if ADE > bestADE, save checkpoint
-            {
-                "epoch": epoch + 1,
-                "state_dict": model.state_dict(),
-                "best_ADE": bestADE,
-                "optimizer": optimizer.state_dict(),
-            },
-            is_best,
-            f"./checkpoint/checkpoint{epoch}.pth.tar",
-        )
+            ADE = validate(args, model, val_loader, epoch, writer)
+            is_best = ADE < bestADE
+            bestADE = min(ADE, bestADE)
+
+            utils.save_checkpoint(  # if ADE > bestADE, save checkpoint
+                {
+                    "epoch": epoch + 1,
+                    "state_dict": model.state_dict(),
+                    "best_ADE": bestADE,
+                    "optimizer": optimizer.state_dict(),
+                },
+                is_best,
+                f"./checkpoint/checkpoint{epoch}.pth.tar",
+            )
 
     writer.close()
 

@@ -167,12 +167,12 @@ def cal_goal(traj):                       # Tensor [20, 1413, 2]
 
             turn = torch.dot(action[i, j, :], action[i+1, j, :]) / (velocity1 * velocity2)
 
-            if turn < 0.3:  # 转弯的余弦值小于0.3, 参数需要是否调整 ?
+            if turn < 0.1:  # 转弯的余弦值小于0.3, 参数需要是否调整 ?
                 goal[index:i+2, j, :] = traj[i+1, j, :]
                 index = i + 1
                 continue
 
-            if velocity1 < 0.02:     # 速度小于0.1, 参数需要是否调整 ?
+            if velocity1 < 0.0000002:     # 速度小于0.1, 参数需要是否调整 ?
                 goal[index:i+1, j, :] = traj[i+1, j, :]
                 index = i
 

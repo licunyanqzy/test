@@ -38,6 +38,7 @@ parser.add_argument(
     metavar="PATH", help="path to latest checkpoint (default: none)"
 )
 parser.add_argument("--num_samples", default=1, type=int)      # 暂时调整为1,与 best_k 一致
+parser.add_argument("--gpu_num", default="1", type=str)
 
 
 def evaluate_helper(error, seq_start_end):
@@ -105,13 +106,11 @@ def evaluate(args, loader, model):
             for _ in range(args.num_samples):
                 traj_rel_gt = torch.cat((obs_traj_rel, pred_traj_gt_rel), dim=0)
 
-                pred_goal_fake, pred_action_fake = model(
-                    traj_rel_gt, seq_start_end,
-                )
+                pred_traj_fake_rel = model(traj_rel_gt, seq_start_end, training_step=2)
 
-                pred_traj_fake = pred_action_fake
-                pred_traj_fake_predpart = pred_traj_fake[-args.pred_len:]
-                pred_traj_fake_abs = utils.relative_to_abs(pred_traj_fake_predpart, obs_traj[-1])
+                # pred_traj_fake = pred_action_fake
+                # pred_traj_fake_predpart = pred_traj_fake[-args.pred_len:]
+                pred_traj_fake_abs = utils.relative_to_abs(pred_traj_fake_rel, obs_traj[-1])
 
                 ADE_, FDE_ = utils.cal_ADE_FDE(pred_traj_gt, pred_traj_fake_abs, mode="raw")
                 ADE.append(ADE_)
@@ -123,7 +122,7 @@ def evaluate(args, loader, model):
             FDE_outer.append(FDE_sum)
 
         ADE_output = sum(ADE_outer) / (traj_sum * args.pred_len)
-        FDE_output = sum(FDE_outer) / (traj_sum * args.pred_len)
+        FDE_output = sum(FDE_outer) / traj_sum
 
         return ADE_output, FDE_output
 
@@ -146,4 +145,5 @@ if __name__ == "__main__":
     torch.manual_seed(72)
     torch.backends.cudnn.deterministic = True
     torch.backends.cudnn.benchmark = False
+    os.environ["CUDA_VISIBLE_DEVICES"] = args.gpu_num
     main(args)
