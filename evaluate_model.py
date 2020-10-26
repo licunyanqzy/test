@@ -37,7 +37,7 @@ parser.add_argument(
     "--resume", default="./model_best.pth.tar", type=str,
     metavar="PATH", help="path to latest checkpoint (default: none)"
 )
-parser.add_argument("--num_samples", default=1, type=int)      # 暂时调整为1,与 best_k 一致
+parser.add_argument("--num_samples", default=20, type=int)      # 暂时调整为1,与 best_k 一致
 parser.add_argument("--gpu_num", default="1", type=str)
 
 
@@ -104,9 +104,9 @@ def evaluate(args, loader, model):
             traj_sum += pred_traj_gt.size(1)
 
             for _ in range(args.num_samples):
-                traj_rel_gt = torch.cat((obs_traj_rel, pred_traj_gt_rel), dim=0)
+                # traj_rel_gt = torch.cat((obs_traj_rel, pred_traj_gt_rel), dim=0)
 
-                pred_traj_fake_rel = model(traj_rel_gt, seq_start_end, training_step=2)
+                pred_traj_fake_rel = model(obs_traj, obs_traj_rel, seq_start_end)
 
                 # pred_traj_fake = pred_action_fake
                 # pred_traj_fake_predpart = pred_traj_fake[-args.pred_len:]

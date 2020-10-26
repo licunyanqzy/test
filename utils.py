@@ -88,6 +88,18 @@ def l2_loss(pred_traj, pred_traj_gt, loss_mask, mode="average"):
         return loss.sum(dim=2).sum(dim=1)
 
 
+def l2_loss_sum(l2_loss, seq_start_end, seq_len):
+    loss_sum = torch.zeros(1).cuda()
+    num_sum = torch.zeros(1).cuda()
+    for start, end in seq_start_end.data:
+        _l2_loss = torch.narrow(l2_loss, 0, start, end - start)
+        _l2_loss = torch.sum(_l2_loss, dim=0)
+        _l2_loss = torch.min(_l2_loss)
+        loss_sum += _l2_loss
+        num_sum += seq_len * (end - start)
+    return loss_sum / num_sum
+
+
 class AverageMeter(object):     # 作用 ?
     """Computes and stores the average and current value"""
 

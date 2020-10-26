@@ -364,18 +364,14 @@ class Decoder(nn.Module):
         traj_real_embedding = traj_real_embedding.view(-1, batch, self.goal_decoder_input_dim)
 
         if self.training:
-            # for i, input_data in enumerate(
-            #   action_real_embedding[-self.pred_len:].chunk(
-            #       action_real_embedding[-self.pred_len:].size(0), dim=0
-            #   )
-            # ):
             for i in range(self.pred_len):
-                teacher_forcing = random.random() < teacher_forcing_ratio
-                if teacher_forcing:
+                if training_step == 1:
                     goal_input_data = traj_real_embedding[-self.pred_len + i]
-                    action_input_data = action_real_embedding[-self.pred_len + i]
-                else:
-                    goal_input_data = self.goalEmbedding(action_output)
+                elif training_step == 2:
+                    goal_input_data = traj_real_embedding[-self.pred_len + i]
+                    action_input_data = self.actionEmbedding(action_output)
+                elif training_step == 3:
+                    goal_input_data = self.goalEmbedding(traj_output)
                     action_input_data = self.actionEmbedding(action_output)
 
                 goal_decoder_hidden_state, goal_decoder_cell_state = self.goalDecoderLSTM(
@@ -400,7 +396,7 @@ class Decoder(nn.Module):
                 action_output = self.hidden2action(action_decoder_hidden_state)
                 traj_output = traj_output + action_output
 
-                if training_step == 2:
+                if training_step == 2 or 3:
                     pred_seq += [action_output]
         else:
             for i in range(self.pred_len):
