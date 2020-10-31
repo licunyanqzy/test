@@ -5,6 +5,7 @@ import random
 import numpy as np
 import os
 import line_profiler
+import utils
 
 
 def get_noise(shape, noise_type):
@@ -173,7 +174,7 @@ class InteractionGate(nn.Module):
 
         self.distEmbedding = nn.Linear(1, self.distance_embedding_dim)
         self.gateStep1 = nn.Linear(
-            distance_embedding_dim * 2 + action_decoder_hidden_dim * 2, action_decoder_hidden_dim
+            distance_embedding_dim + action_decoder_hidden_dim * 2, action_decoder_hidden_dim
         )
         self.gateStep2 = nn.Sigmoid()
         self.flag = 0
@@ -195,7 +196,7 @@ class InteractionGate(nn.Module):
         outer_product_2 = torch.det(torch.cat((action1-goal1, action1-goal2), dim=2).view(n, n, 2, 2))
         m = outer_product_1 * outer_product_2 >= 0
         mask = (m & m.t()).int()
-        distance_other = mask * torch.norm(action1 - goal2, dim=2)     # 不用算交叉点的
+        distance_other = mask * torch.norm(action2 - goal2, dim=2)     # 不用算交叉点的
 
         projection1 = (torch.sum((action2-goal2)*(action2-action1), dim=2) /
                        torch.norm(action2-goal2, dim=2) ** 2).unsqueeze(2).repeat([1, 1, 2])
@@ -217,30 +218,31 @@ class InteractionGate(nn.Module):
         # cross = d1/(d1+d2) * foot_point_2 + d2/(d1+d2) * foot_point_1
         # cross[cross != cross] = 0   # 强行将nan置0,恐有问题 ?
 
-        distance_other += (torch.ones(n, n).cuda() - mask) * torch.norm(cross - action1, dim=2)
+        distance_other += (torch.ones(n, n).cuda() - mask) * torch.norm(cross - action2, dim=2)
 
-        return distance_self, distance_other
+        return distance_other
 
     def forward(self, action_hidden_state, goal_hidden_state, goal, action,):   # 张量化可能存在问题 ?
         num = goal.size()[0]
-        distance_self, distance_other = self.cal_dist(goal, action)      # [21,21]
+        distance_other = self.cal_dist(goal, action)      # [21,21]
 
         distance_other_embedding = self.distEmbedding(distance_other.contiguous().view(-1, 1))
         distance_other_embedding = distance_other_embedding.view(num, num, self.distance_embedding_dim)
-        distance_self_embedding = self.distEmbedding(distance_self.contiguous().view(-1, 1))
-        distance_self_embedding = distance_self_embedding.view(num, num, self.distance_embedding_dim)
+        # distance_self_embedding = self.distEmbedding(distance_self.contiguous().view(-1, 1))
+        # distance_self_embedding = distance_self_embedding.view(num, num, self.distance_embedding_dim)
 
-        temp_action = action_hidden_state.repeat(num, 1).view(num, num, -1).transpose(1, 0)
+        temp_action_1 = action_hidden_state.repeat(num, 1).view(num, num, -1)
+        temp_action_2 = temp_action_1.transpose(1, 0)
         temp_goal = goal_hidden_state.repeat(num, 1).view(num, num, -1)     # [21,21,48]
 
         mask_goal = torch.eye(num).cuda()
         mask_goal = mask_goal.unsqueeze(2).repeat([1, 1, self.action_decoder_hidden_dim])
         mask_action = torch.ones([num, num, self.action_decoder_hidden_dim]).cuda() - mask_goal
 
-        goal_action = temp_goal * mask_goal + temp_action * mask_action
+        goal_action = temp_goal * mask_goal + temp_action_1 * mask_action
 
         gate = self.gateStep1(torch.cat(
-            [temp_action, goal_action, distance_self_embedding, distance_other_embedding], dim=2
+            [temp_action_2, goal_action, distance_other_embedding], dim=2
         ))
         gate = self.gateStep2(gate)     # [21,21,48]
         output = goal_action * gate
@@ -276,7 +278,7 @@ class GAT(nn.Module):
         h_self = action_hidden_state.repeat(n+1, 1).view(n+1, n, -1).transpose(1, 0)
         h_other = torch.cat([action_hidden_state.unsqueeze(1), gated_h], dim=1)
 
-        output = self.gatLayer(h_self, h_other)    # [21,22,48]
+        output = self.gatLayer(h_self, h_other)    # [21,22,48] -> [21,48]
 
         return output
 
@@ -364,18 +366,14 @@ class Decoder(nn.Module):
         traj_real_embedding = traj_real_embedding.view(-1, batch, self.goal_decoder_input_dim)
 
         if self.training:
-            # for i, input_data in enumerate(
-            #   action_real_embedding[-self.pred_len:].chunk(
-            #       action_real_embedding[-self.pred_len:].size(0), dim=0
-            #   )
-            # ):
             for i in range(self.pred_len):
-                teacher_forcing = random.random() < teacher_forcing_ratio
-                if teacher_forcing:
+                if training_step == 1:
                     goal_input_data = traj_real_embedding[-self.pred_len + i]
-                    action_input_data = action_real_embedding[-self.pred_len + i]
-                else:
-                    goal_input_data = self.goalEmbedding(action_output)
+                elif training_step == 2:
+                    goal_input_data = traj_real_embedding[-self.pred_len + i]
+                    action_input_data = self.actionEmbedding(action_output)
+                elif training_step == 3:
+                    goal_input_data = self.goalEmbedding(traj_output)
                     action_input_data = self.actionEmbedding(action_output)
 
                 goal_decoder_hidden_state, goal_decoder_cell_state = self.goalDecoderLSTM(
@@ -389,18 +387,19 @@ class Decoder(nn.Module):
 
                 # 两种思路: 现为先LSTM后interaction, 是否需要调整为先interaction后LSTM ?
 
-                action_decoder_hidden_state, action_decoder_cell_state = self.actionDecoderLSTM(
-                    action_input_data.squeeze(0), (action_decoder_hidden_state, action_decoder_cell_state)
-                )
-
                 action_decoder_hidden_state = self.attention(
                     action_decoder_hidden_state, goal_decoder_hidden_state,
                     goal_output, traj_output, seq_start_end
                 )
+
+                action_decoder_hidden_state, action_decoder_cell_state = self.actionDecoderLSTM(
+                    action_input_data.squeeze(0), (action_decoder_hidden_state, action_decoder_cell_state)
+                )
+
                 action_output = self.hidden2action(action_decoder_hidden_state)
                 traj_output = traj_output + action_output
 
-                if training_step == 2:
+                if training_step == 2 or 3:
                     pred_seq += [action_output]
         else:
             for i in range(self.pred_len):
@@ -413,15 +412,16 @@ class Decoder(nn.Module):
 
                 # 两种思路: 现为先LSTM后interaction, 是否需要调整为先interaction后LSTM ?
 
+                action_decoder_hidden_state = self.attention(
+                    action_decoder_hidden_state, goal_decoder_hidden_state,
+                    goal_output, traj_output, seq_start_end
+                )
+
                 action_input_data = self.actionEmbedding(action_output)
                 action_decoder_hidden_state, action_decoder_cell_state = self.actionDecoderLSTM(
                     action_input_data.squeeze(0), (action_decoder_hidden_state, action_decoder_cell_state)
                 )
 
-                action_decoder_hidden_state = self.attention(
-                    action_decoder_hidden_state, goal_decoder_hidden_state,
-                    goal_output, traj_output, seq_start_end
-                )
                 action_output = self.hidden2action(action_decoder_hidden_state)
                 traj_output = traj_output + action_output
                 pred_seq += [action_output]
