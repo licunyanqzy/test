@@ -76,6 +76,14 @@ def cal_ADE_FDE(pred_traj_gt, pred_traj, consider_ped=None, mode="sum"):
     return ADE, FDE
 
 
+def loss_test(pred_fake, pred_gt):
+    loss = pred_gt - pred_fake
+    loss = loss ** 2
+    loss = torch.mean(torch.sqrt(torch.sum(loss, dim=2)), dim=1)
+    ave = torch.mean(loss)
+    return torch.cat((loss, ave.unsqueeze(0)))
+
+
 def l2_loss(pred_traj, pred_traj_gt, loss_mask, mode="average"):
     seq_len, batch, _ = pred_traj.size()
     loss = (pred_traj_gt.permute(1, 0, 2) - pred_traj.permute(1, 0, 2)) ** 2

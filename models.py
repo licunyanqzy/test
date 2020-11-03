@@ -174,7 +174,7 @@ class InteractionGate(nn.Module):
 
         self.distEmbedding = nn.Linear(1, self.distance_embedding_dim)
         self.gateStep1 = nn.Linear(
-            distance_embedding_dim + action_decoder_hidden_dim * 2, action_decoder_hidden_dim
+            distance_embedding_dim * 2 + action_decoder_hidden_dim * 2, action_decoder_hidden_dim
         )
         self.gateStep2 = nn.Sigmoid()
         self.flag = 0
@@ -190,13 +190,12 @@ class InteractionGate(nn.Module):
         goal2 = goal1.transpose(1, 0)
         action2 = action1.transpose(1, 0)
 
-        distance_self = torch.norm(action2 - goal2, dim=2)
-
         outer_product_1 = torch.det(torch.cat((action1-goal1, action1-action2), dim=2).view(n, n, 2, 2))
         outer_product_2 = torch.det(torch.cat((action1-goal1, action1-goal2), dim=2).view(n, n, 2, 2))
         m = outer_product_1 * outer_product_2 >= 0
         mask = (m & m.t()).int()
-        distance_other = mask * torch.norm(action2 - goal2, dim=2)     # 不用算交叉点的
+        distance_self = mask * torch.norm(action2 - goal2, dim=2)     # 不用算交叉点的
+        distance_other = mask * torch.norm(action1 - goal1, dim=2)
 
         projection1 = (torch.sum((action2-goal2)*(action2-action1), dim=2) /
                        torch.norm(action2-goal2, dim=2) ** 2).unsqueeze(2).repeat([1, 1, 2])
@@ -218,18 +217,19 @@ class InteractionGate(nn.Module):
         # cross = d1/(d1+d2) * foot_point_2 + d2/(d1+d2) * foot_point_1
         # cross[cross != cross] = 0   # 强行将nan置0,恐有问题 ?
 
-        distance_other += (torch.ones(n, n).cuda() - mask) * torch.norm(cross - action2, dim=2)
+        distance_self += (torch.ones(n, n).cuda() - mask) * torch.norm(cross - action2, dim=2)
+        distance_other += (torch.ones((n, n)).cuda() - mask) * torch.norm(cross - action1, dim=2)
 
-        return distance_other
+        return distance_self, distance_other
 
     def forward(self, action_hidden_state, goal_hidden_state, goal, action,):   # 张量化可能存在问题 ?
         num = goal.size()[0]
-        distance_other = self.cal_dist(goal, action)      # [21,21]
+        distance_self, distance_other = self.cal_dist(goal, action)      # [21,21]
 
         distance_other_embedding = self.distEmbedding(distance_other.contiguous().view(-1, 1))
         distance_other_embedding = distance_other_embedding.view(num, num, self.distance_embedding_dim)
-        # distance_self_embedding = self.distEmbedding(distance_self.contiguous().view(-1, 1))
-        # distance_self_embedding = distance_self_embedding.view(num, num, self.distance_embedding_dim)
+        distance_self_embedding = self.distEmbedding(distance_self.contiguous().view(-1, 1))
+        distance_self_embedding = distance_self_embedding.view(num, num, self.distance_embedding_dim)
 
         temp_action_1 = action_hidden_state.repeat(num, 1).view(num, num, -1)
         temp_action_2 = temp_action_1.transpose(1, 0)
@@ -242,7 +242,7 @@ class InteractionGate(nn.Module):
         goal_action = temp_goal * mask_goal + temp_action_1 * mask_action
 
         gate = self.gateStep1(torch.cat(
-            [temp_action_2, goal_action, distance_other_embedding], dim=2
+            [temp_action_2, goal_action, distance_other_embedding, distance_self_embedding], dim=2
         ))
         gate = self.gateStep2(gate)     # [21,21,48]
         output = goal_action * gate
@@ -490,7 +490,7 @@ class TrajectoryPrediction(nn.Module):
         return decoder_h
 
     def forward(
-            self, input_traj, input_action, seq_start_end, teacher_forcing_ratio=0.5, training_step=2
+            self, input_traj, input_action, seq_start_end, teacher_forcing_ratio=0.5, training_step=3
     ):
         self.flag += 1
         goal_encoder_hidden_state = self.goalEncoder(input_traj)

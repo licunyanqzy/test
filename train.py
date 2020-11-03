@@ -87,7 +87,7 @@ def train(args, model, train_loader, optimizer, epoch, writer):
 
         # 注意 training step 分为两个阶段, teacher forcing ratio 如何根据epoch动态调整 ?
         # Exponential Decay, Inverse Sigmoid decay, Linear decay
-        if epoch < 0:
+        if epoch < 6:
             training_step = 1
         elif epoch < 0:
             training_step = 2
@@ -142,7 +142,7 @@ def validate(args, model, val_loader, epoch, writer):
             pred_goal_gt = goal_gt[args.obs_len:]
             traj_gt = torch.cat((obs_traj, pred_traj_gt), dim=0)
 
-            pred_traj_fake_rel = model(obs_traj, obs_traj_rel, seq_start_end, training_step=1)
+            pred_traj_fake_rel = model(obs_traj, obs_traj_rel, seq_start_end, training_step=3)
 
             pred_traj_fake_abs = utils.relative_to_abs(pred_traj_fake_rel, obs_traj[-1])
 
@@ -228,7 +228,7 @@ def main(args):
     for epoch in range(args.start_epoch, args.num_epoch):
         # sigma = sigma.cuda()
 
-        if epoch < 0:
+        if epoch < 6:
             train(args, model, train_loader, optimizer, epoch, writer)
         else:
             train(args, model, train_loader, optimizer, epoch, writer)
