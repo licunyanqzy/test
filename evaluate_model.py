@@ -30,7 +30,7 @@ parser.add_argument("--action_input_dim", default=16, type=int)
 parser.add_argument("--action_encoder_hidden_dim", default=32, type=int)
 parser.add_argument("--goal_input_dim", default=16, type=int)
 parser.add_argument("--goal_encoder_hidden_dim", default=32, type=int)
-parser.add_argument("--distance_embedding_dim", default=32, type=int)
+parser.add_argument("--distance_embedding_dim", default=128, type=int)
 
 parser.add_argument("--dset_type", default="test", type=str)
 parser.add_argument(
@@ -38,7 +38,7 @@ parser.add_argument(
     metavar="PATH", help="path to latest checkpoint (default: none)"
 )
 parser.add_argument("--num_samples", default=20, type=int)      # 暂时调整为1,与 best_k 一致
-parser.add_argument("--gpu_num", default="1", type=str)
+parser.add_argument("--gpu_num", default="0", type=str)
 
 
 def evaluate_helper(error, seq_start_end):

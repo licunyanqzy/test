@@ -19,9 +19,9 @@ parser = argparse.ArgumentParser()
 parser.add_argument("--log_dir", default="./", help="Directory containing logging file")
 parser.add_argument("--dataset_name", default="zara2", type=str)
 parser.add_argument("--delim", default="\t")
-parser.add_argument("--loader_num_workers", default=4, type=int)    # 4 -> 8 or 16 !
+parser.add_argument("--loader_num_workers", default=1, type=int)    # 4 -> 8 or 16 !
 parser.add_argument("--skip", default=1, type=int)
-parser.add_argument("--batch_size", default=64, type=int)       # 64 -> 128 ! ?
+parser.add_argument("--batch_size", default=32, type=int)       # 64 -> 128 ! ?
 parser.add_argument("--seed", default=72, type=int)
 
 parser.add_argument("--obs_len", default=8, type=int)
@@ -31,7 +31,7 @@ parser.add_argument("--action_encoder_hidden_dim", default=32, type=int)
 parser.add_argument("--action_input_dim", default=16, type=int)
 parser.add_argument("--goal_input_dim", default=16, type=int)
 parser.add_argument("--goal_encoder_hidden_dim", default=32, type=int)
-parser.add_argument("--distance_embedding_dim", default=32, type=int)
+parser.add_argument("--distance_embedding_dim", default=128, type=int)
 
 parser.add_argument("--hidden_units", default="16", type=str)   # n_units
 parser.add_argument("--heads", default="4,1", type=str)   # n_heads
@@ -41,12 +41,12 @@ parser.add_argument("--alpha", default=0.2, type=float)   # alpha for the leaky 
 parser.add_argument("--noise_dim", default=(16,), type=int_tuple)
 parser.add_argument("--noise_type", default="gaussian", type=str)
 
-parser.add_argument("--lr", default=1e-3, type=float)
+parser.add_argument("--lr", default=1e-3, type=float)       # 1e-3
 parser.add_argument("--start_epoch", default=0, type=int)
-parser.add_argument("--num_epoch", default=150, type=int)
+parser.add_argument("--num_epoch", default=200, type=int)
 parser.add_argument("--best_k", default=20, type=int)
 
-parser.add_argument("--gpu_num", default="0", type=str)
+parser.add_argument("--gpu_num", default="1", type=str)
 parser.add_argument("--use_gpu", default=True, type=bool)
 parser.add_argument("--print_every", default=10, type=int)
 
@@ -87,7 +87,7 @@ def train(args, model, train_loader, optimizer, epoch, writer):
 
         # 注意 training step 分为两个阶段, teacher forcing ratio 如何根据epoch动态调整 ?
         # Exponential Decay, Inverse Sigmoid decay, Linear decay
-        if epoch < 6:
+        if epoch < 0:
             training_step = 1
         elif epoch < 0:
             training_step = 2
@@ -228,7 +228,7 @@ def main(args):
     for epoch in range(args.start_epoch, args.num_epoch):
         # sigma = sigma.cuda()
 
-        if epoch < 6:
+        if epoch < 0:
             train(args, model, train_loader, optimizer, epoch, writer)
         else:
             train(args, model, train_loader, optimizer, epoch, writer)
