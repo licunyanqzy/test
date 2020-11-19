@@ -91,19 +91,23 @@ def train(args, model, train_loader, optimizer, epoch, writer):
             training_step = 1
         elif epoch < 0:
             training_step = 2
-        else:
+        elif epoch < 0:
             training_step = 3
+        else:
+            training_step = 4
+            ratio = np.exp(-(epoch)/20)
+            # ratio = 0
 
         pred_seq_fake = model(     # teacher_forcing_ratio 的取值 ?
-            traj_gt, traj_gt_rel, seq_start_end, training_step=training_step
+            traj_gt, traj_gt_rel, seq_start_end, teacher_forcing_ratio=ratio, training_step=training_step
         )
 
         if training_step == 1:
             l2_loss = utils.l2_loss(pred_seq_fake, pred_goal_gt, loss_mask, mode="raw").unsqueeze(1)
-        elif training_step == 2 or 3:
-            # l2_loss = utils.l2_loss(pred_seq_fake, pred_traj_gt_rel, loss_mask, mode="raw").unsqueeze(1)
-            pred_seq_fake_abs = utils.relative_to_abs(pred_seq_fake, obs_traj[-1])
-            l2_loss = utils.l2_loss(pred_seq_fake_abs, pred_traj_gt, loss_mask, mode="raw").unsqueeze(1)
+        else:
+            l2_loss = utils.l2_loss(pred_seq_fake, pred_traj_gt_rel, loss_mask, mode="raw").unsqueeze(1)
+            # pred_seq_fake_abs = utils.relative_to_abs(pred_seq_fake, obs_traj[-1])
+            # l2_loss = utils.l2_loss(pred_seq_fake_abs, pred_traj_gt, loss_mask, mode="raw").unsqueeze(1)
 
         l2_loss_sum = utils.l2_loss_sum(l2_loss, seq_start_end, pred_seq_fake.shape[0])
 

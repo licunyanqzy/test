@@ -42,6 +42,7 @@ class ActionEncoder(nn.Module):
 
         self.actionEncoderLSTM = nn.LSTMCell(self.action_encoder_input_dim, self.action_encoder_hidden_dim)
         self.inputEmbedding = nn.Linear(2, self.action_encoder_input_dim)
+        self.relu = nn.ReLU()
 
     def init_hidden(self, batch):
         return (        # torch.zeros or torch.randn ?
@@ -53,7 +54,7 @@ class ActionEncoder(nn.Module):
         batch = obs_traj.shape[1]
         action_encoder_hidden_state, action_encoder_cell_state = self.init_hidden(batch)
 
-        obs_traj_embedding = self.inputEmbedding(obs_traj.contiguous().view(-1, 2))
+        obs_traj_embedding = self.relu(self.inputEmbedding(obs_traj.contiguous().view(-1, 2)))
         obs_traj_embedding = obs_traj_embedding.view(-1, batch, self.action_encoder_input_dim)
 
         for i, input_data in enumerate(
@@ -79,6 +80,7 @@ class GoalEncoder(nn.Module):
 
         self.goalEncoderLSTM = nn.LSTMCell(self.goal_encoder_input_dim, self.goal_encoder_hidden_dim)
         self.inputEmbedding = nn.Linear(2, self.goal_encoder_input_dim)
+        self.relu = nn.ReLU()
 
         self.hidden2goal = nn.Linear(goal_encoder_hidden_dim, 2)    # for experiment_goal
         self.flag = 0
@@ -95,7 +97,7 @@ class GoalEncoder(nn.Module):
         batch = obs_goal.shape[1]
         goal_encoder_hidden_state, goal_encoder_cell_state = self.init_hidden(batch)
 
-        obs_goal_embedding = self.inputEmbedding(obs_goal.contiguous().view(-1, 2))
+        obs_goal_embedding = self.relu(self.inputEmbedding(obs_goal.contiguous().view(-1, 2)))
 
         # if self.flag == 2:
         #     print(obs_goal_embedding)
@@ -181,7 +183,9 @@ class GraphAttentionLayer(nn.Module):
         h_prime = torch.matmul(h_prime, self.a)     # [4,21,22,1]
         alpha = self.softmax(self.leaky_relu(h_prime))
         h_attn = alpha.repeat(1, 1, 1, self.f_out) * h_other   # [4,21,22,48]
+        # h_attn = torch.matmul(h_attn, self.w)       # 似存在问题 ?
         output = torch.mean(torch.sum(h_attn, dim=-2), dim=0)    # [21,48]
+        output = F.relu(output)
 
         if self.bias is not None:
             return output + self.bias
@@ -343,6 +347,9 @@ class GAT(nn.Module):
         h_self = action_hidden_state.repeat(n+1, 1).view(n+1, n, -1).transpose(1, 0)
         h_other = torch.cat([action_hidden_state.unsqueeze(1), gated_h], dim=1)
 
+        # h_self = action_hidden_state.repeat(n, 1).view(n, n, -1).transpose(1, 0)
+        # h_other = action_hidden_state.repeat(n, 1).view(n, n, -1)
+
         output = self.gatLayer(h_self, h_other, goal, action)    # [21,22,48] -> [21,48]
 
         # temp_action_2 = output.repeat(n, 1).view(n, n, -1)
@@ -409,6 +416,8 @@ class Decoder(nn.Module):
         self.actionEmbedding = nn.Linear(2, self.action_decoder_input_dim)
         self.hidden2action = nn.Linear(self.action_decoder_hidden_dim, 2)
 
+        self.relu = nn.ReLU()
+
         self.attention = Attention(  # 是否存在问题 ?
             self.distance_embedding_dim, self.action_decoder_hidden_dim, n_units, n_heads, dropout, alpha
         )
@@ -431,9 +440,9 @@ class Decoder(nn.Module):
         traj_output = traj_real[self.obs_len - 1]
 
         batch = action_real.shape[1]
-        action_real_embedding = self.actionEmbedding(action_real.contiguous().view(-1, 2))    # [28260, 16]
+        action_real_embedding = self.relu(self.actionEmbedding(action_real.contiguous().view(-1, 2)))    # [28260, 16]
         action_real_embedding = action_real_embedding.view(-1, batch, self.action_decoder_input_dim)  # [20,1413,16]
-        traj_real_embedding = self.goalEmbedding(traj_real.contiguous().view(-1, 2))
+        traj_real_embedding = self.relu(self.goalEmbedding(traj_real.contiguous().view(-1, 2)))
         traj_real_embedding = traj_real_embedding.view(-1, batch, self.goal_decoder_input_dim)
 
         if self.training:
@@ -446,6 +455,13 @@ class Decoder(nn.Module):
                 elif training_step == 3:
                     goal_input_data = self.goalEmbedding(traj_output)
                     action_input_data = self.actionEmbedding(action_output)
+                elif training_step == 4:
+                    if random.random() < teacher_forcing_ratio:
+                        goal_input_data = traj_real_embedding[-self.pred_len + i]
+                        action_input_data = action_real_embedding[-self.pred_len + i]
+                    else:
+                        goal_input_data = self.relu(self.goalEmbedding(traj_output))
+                        action_input_data = self.relu(self.actionEmbedding(action_output))
 
                 goal_decoder_hidden_state, goal_decoder_cell_state = self.goalDecoderLSTM(
                     goal_input_data.squeeze(0), (goal_decoder_hidden_state, goal_decoder_cell_state)
@@ -474,7 +490,7 @@ class Decoder(nn.Module):
                     pred_seq += [action_output]
         else:
             for i in range(self.pred_len):
-                goal_input_data = self.goalEmbedding(traj_output)
+                goal_input_data = self.relu(self.goalEmbedding(traj_output))
                 goal_decoder_hidden_state, goal_decoder_cell_state = self.goalDecoderLSTM(
                     goal_input_data.squeeze(0), (goal_decoder_hidden_state, goal_decoder_cell_state)
                 )
@@ -488,7 +504,7 @@ class Decoder(nn.Module):
                     goal_output, traj_output, seq_start_end
                 )
 
-                action_input_data = self.actionEmbedding(action_output)
+                action_input_data = self.relu(self.actionEmbedding(action_output))
                 action_decoder_hidden_state, action_decoder_cell_state = self.actionDecoderLSTM(
                     action_input_data.squeeze(0), (action_decoder_hidden_state, action_decoder_cell_state)
                 )

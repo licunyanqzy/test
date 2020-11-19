@@ -1,16 +1,16 @@
-import torch
-import torch.nn as nn
-import torch.optim as optim
-import numpy as np
-import pylab
-import torch.nn.functional as F
-import multiprocessing
-import timeit
-import operator
 
+epoch = 4
 
-a = np.arange(1, 11).reshape([2, 5])
-b = np.cumsum(a)
-print(a)
-print(b)
+if epoch < 0:
+    t = 1
+elif epoch < 0:
+    t = 2
+else:
+    t = 3
 
+if t == 1:
+    print("111")
+else:
+    print("222")
+
+print("333")

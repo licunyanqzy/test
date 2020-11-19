@@ -254,3 +254,11 @@ def cal_goal(traj):                       # Tensor [20, 1413, 2]
     return goal
 
 
+def l2_loss_sum(l2_loss, seq_start_end, seq_len):
+    loss_sum = torch.zeros(1).cuda()
+    for start, end in seq_start_end.data:
+        _l2_loss = torch.narrow(l2_loss, 0, start, end - start)
+        _l2_loss = torch.sum(_l2_loss, dim=0)
+        _l2_loss = torch.min(_l2_loss) / (seq_len * (end - start))
+        loss_sum += _l2_loss
+    return loss_sum

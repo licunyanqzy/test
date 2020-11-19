@@ -17,7 +17,7 @@ parser.add_argument("--loader_num_workers", default=4, type=int)
 parser.add_argument("--obs_len", default=8, type=int)
 parser.add_argument("--pred_len", default=12, type=int)
 parser.add_argument("--skip", default=1, type=int)
-parser.add_argument("--batch_size", default=64, type=int)
+parser.add_argument("--batch_size", default=32, type=int)
 parser.add_argument("--noise_dim", default=(16,), type=int_tuple)
 parser.add_argument("--noise_type", default="gaussian")
 
